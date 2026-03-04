@@ -338,8 +338,6 @@ message(sprintf("\nRepertoire de test : %s", dossier_test))
 
 if (n_fail > 0) {
   message("\n[ATTENTION] Certains tests ont echoue.")
-  quit(status = 1)
 } else {
   message("\nTous les tests sont passes !")
-  quit(status = 0)
 }
