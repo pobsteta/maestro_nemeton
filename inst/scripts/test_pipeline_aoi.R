@@ -4,18 +4,18 @@
 # Test du pipeline MAESTRO sur une AOI de demonstration
 #
 # Teste chaque etape independamment :
-#   1. Creation d'une AOI de test (petit rectangle en foret)
+#   1. Chargement de l'AOI depuis data/aoi.gpkg
 #   2. Telechargement des ortho RVB et IRC depuis la Geoplateforme IGN
 #   3. Telechargement du MNT RGE ALTI 1m
 #   4. Combinaison des bandes (RGBI + MNT -> 5 bandes)
 #   5. Decoupage en patches et verification des dimensions
 #
 # L'inference du modele n'est PAS executee (necessite PyTorch).
+# Les resultats sont ecrits dans le repertoire outputs/
 #
 # Utilisation :
 #   Rscript inst/scripts/test_pipeline_aoi.R
 #   Rscript inst/scripts/test_pipeline_aoi.R --millesime 2023
-#   Rscript inst/scripts/test_pipeline_aoi.R --petite_zone
 # =============================================================================
 
 # --- Charger le package ---
@@ -38,14 +38,10 @@ library(fs)
 # --- Arguments simples ---
 args <- commandArgs(trailingOnly = TRUE)
 millesime <- NULL
-petite_zone <- FALSE
 
 for (i in seq_along(args)) {
   if (args[i] == "--millesime" && i < length(args)) {
     millesime <- as.integer(args[i + 1])
-  }
-  if (args[i] == "--petite_zone") {
-    petite_zone <- TRUE
   }
 }
 
@@ -81,34 +77,12 @@ dossier_test <- "outputs"
 dir.create(dossier_test, showWarnings = FALSE, recursive = TRUE)
 message(sprintf("Repertoire de test : %s", dossier_test))
 
-if (petite_zone) {
-  largeur <- 200
-  message("Mode petite zone : 200m x 200m")
-} else {
-  largeur <- 500
-  message("Zone de test : 500m x 500m")
+aoi_path <- file.path("data", "aoi.gpkg")
+if (!file.exists(aoi_path)) {
+  stop("Fichier AOI introuvable : ", aoi_path,
+       "\nPlacez votre fichier aoi.gpkg dans le repertoire data/")
 }
-
-# Foret de Fontainebleau
-xmin <- 652400
-ymin <- 6812400
-xmax <- xmin + largeur
-ymax <- ymin + largeur
-
-coords <- matrix(c(
-  xmin, ymin, xmax, ymin, xmax, ymax, xmin, ymax, xmin, ymin
-), ncol = 2, byrow = TRUE)
-
-poly <- st_polygon(list(coords))
-aoi <- st_sf(
-  nom = "Zone test Fontainebleau",
-  geometry = st_sfc(poly, crs = 2154)
-)
-
-aoi_dir <- "data"
-dir.create(aoi_dir, showWarnings = FALSE, recursive = TRUE)
-aoi_path <- file.path(aoi_dir, "aoi.gpkg")
-st_write(aoi, aoi_path, delete_dsn = TRUE, quiet = TRUE)
+message(sprintf("AOI : %s", aoi_path))
 
 # =============================================================================
 # TEST 1 : Chargement de l'AOI
@@ -121,11 +95,13 @@ aoi_loaded <- tryCatch(load_aoi(aoi_path), error = function(e) {
 })
 
 if (!is.null(aoi_loaded)) {
-  test_check(nrow(aoi_loaded) == 1, "AOI contient 1 entite")
+  test_check(nrow(aoi_loaded) >= 1, sprintf("AOI contient %d entite(s)", nrow(aoi_loaded)))
   test_check(st_crs(aoi_loaded)$epsg == 2154, "AOI en Lambert-93")
   bbox <- st_bbox(aoi_loaded)
-  test_check(abs(bbox["xmax"] - bbox["xmin"] - largeur) < 1,
-             sprintf("Largeur AOI = %dm", largeur))
+  largeur_aoi <- bbox["xmax"] - bbox["xmin"]
+  hauteur_aoi <- bbox["ymax"] - bbox["ymin"]
+  message(sprintf("  Emprise AOI : %.0f x %.0f m", largeur_aoi, hauteur_aoi))
+  test_check(largeur_aoi > 0 && hauteur_aoi > 0, "Emprise AOI valide")
 }
 
 # =============================================================================
