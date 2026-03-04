@@ -61,10 +61,39 @@ extraire_patches_raster <- function(r, grille, taille_pixels = 250) {
                    terra::nlyr(r), terra::ncol(r), terra::nrow(r)))
 
   patches_data <- list()
+  ext_raster <- terra::ext(r)
+  skipped <- 0L
 
   for (i in seq_len(nrow(grille))) {
     ext_patch <- terra::ext(sf::st_bbox(grille[i, ]))
-    patch <- terra::crop(r, ext_patch)
+
+    # Verifier que le patch chevauche le raster
+    overlap <- !(ext_patch$xmin >= ext_raster$xmax ||
+                 ext_patch$xmax <= ext_raster$xmin ||
+                 ext_patch$ymin >= ext_raster$ymax ||
+                 ext_patch$ymax <= ext_raster$ymin)
+
+    if (!overlap) {
+      # Patch vide (hors raster) : remplir de NA
+      patches_data[[i]] <- matrix(NA_real_,
+                                   nrow = taille_pixels * taille_pixels,
+                                   ncol = terra::nlyr(r))
+      skipped <- skipped + 1L
+      next
+    }
+
+    patch <- tryCatch(
+      terra::crop(r, ext_patch),
+      error = function(e) NULL
+    )
+
+    if (is.null(patch)) {
+      patches_data[[i]] <- matrix(NA_real_,
+                                   nrow = taille_pixels * taille_pixels,
+                                   ncol = terra::nlyr(r))
+      skipped <- skipped + 1L
+      next
+    }
 
     if (terra::ncol(patch) != taille_pixels || terra::nrow(patch) != taille_pixels) {
       template <- terra::rast(
@@ -83,6 +112,9 @@ extraire_patches_raster <- function(r, grille, taille_pixels = 250) {
     }
   }
 
+  if (skipped > 0L) {
+    message(sprintf("  Patches hors emprise raster (ignores) : %d", skipped))
+  }
   message(sprintf("  Total patches extraits : %d", length(patches_data)))
   patches_data
 }

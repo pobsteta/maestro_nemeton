@@ -169,12 +169,16 @@ raster_to_rgb_df <- function(r, maxpix = 500000) {
   vals <- values(r)
   df <- data.frame(x = coords[, 1], y = coords[, 2])
   if (ncol(vals) >= 3) {
-    df$r <- vals[, 1]; df$g <- vals[, 2]; df$b <- vals[, 3]
-    for (col in c("r", "g", "b")) {
-      v <- df[[col]]; v[is.na(v)] <- 0
-      vmax <- max(v, na.rm = TRUE)
-      if (vmax > 1) df[[col]] <- v / 255
-    }
+    rv <- vals[, 1]; gv <- vals[, 2]; bv <- vals[, 3]
+    rv[is.na(rv)] <- 0; gv[is.na(gv)] <- 0; bv[is.na(bv)] <- 0
+    # Normaliser en 0-1
+    if (max(rv, na.rm = TRUE) > 1) rv <- rv / 255
+    if (max(gv, na.rm = TRUE) > 1) gv <- gv / 255
+    if (max(bv, na.rm = TRUE) > 1) bv <- bv / 255
+    rv <- pmin(pmax(rv, 0), 1)
+    gv <- pmin(pmax(gv, 0), 1)
+    bv <- pmin(pmax(bv, 0), 1)
+    df$hex <- rgb(rv, gv, bv)
   }
   df
 }
@@ -205,8 +209,9 @@ message("  1/7 Orthophoto RVB...")
 df_rvb <- raster_to_rgb_df(ortho$rvb)
 df_rvb <- df_rvb[complete.cases(df_rvb), ]
 
-p_rvb <- ggplot(df_rvb, aes(x = x, y = y)) +
-  geom_raster(fill = rgb(df_rvb$r, df_rvb$g, df_rvb$b)) +
+p_rvb <- ggplot(df_rvb, aes(x = x, y = y, fill = hex)) +
+  geom_raster() +
+  scale_fill_identity() +
   geom_sf(data = aoi, fill = NA, color = "red", linewidth = 0.6, inherit.aes = FALSE) +
   coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
            ylim = c(bbox["ymin"], bbox["ymax"]), crs = 2154) +
@@ -220,8 +225,9 @@ message("  2/7 Infrarouge couleur...")
 df_irc <- raster_to_rgb_df(ortho$irc)
 df_irc <- df_irc[complete.cases(df_irc), ]
 
-p_irc <- ggplot(df_irc, aes(x = x, y = y)) +
-  geom_raster(fill = rgb(df_irc$r, df_irc$g, df_irc$b)) +
+p_irc <- ggplot(df_irc, aes(x = x, y = y, fill = hex)) +
+  geom_raster() +
+  scale_fill_identity() +
   geom_sf(data = aoi, fill = NA, color = "yellow", linewidth = 0.6, inherit.aes = FALSE) +
   coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
            ylim = c(bbox["ymin"], bbox["ymax"]), crs = 2154) +
@@ -239,7 +245,9 @@ df_mnt <- df_mnt[complete.cases(df_mnt), ]
 p_mnt <- ggplot(df_mnt, aes(x = x, y = y, fill = val)) +
   geom_raster() +
   geom_sf(data = aoi, fill = NA, color = "black", linewidth = 0.6, inherit.aes = FALSE) +
-  scale_fill_viridis_c(name = "Alt. (m)", option = "terrain", na.value = "transparent") +
+  scale_fill_gradientn(name = "Alt. (m)",
+                       colours = terrain.colors(20),
+                       na.value = "transparent") +
   coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
            ylim = c(bbox["ymin"], bbox["ymax"]), crs = 2154) +
   labs(title = "Modele Numerique de Terrain",
@@ -274,8 +282,8 @@ p_ndvi <- ggplot(df_ndvi, aes(x = x, y = y, fill = val)) +
 message("  5/7 Grille de patches...")
 
 p_grille <- ggplot() +
-  geom_raster(data = df_rvb, aes(x = x, y = y),
-              fill = rgb(df_rvb$r, df_rvb$g, df_rvb$b), alpha = 0.5) +
+  geom_raster(data = df_rvb, aes(x = x, y = y, fill = hex), alpha = 0.5) +
+  scale_fill_identity() +
   geom_sf(data = grille, fill = NA, color = "blue", linewidth = 0.3) +
   geom_sf(data = aoi, fill = NA, color = "red", linewidth = 0.8) +
   coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
