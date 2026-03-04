@@ -1,8 +1,12 @@
 #' Executer le pipeline complet de reconnaissance des essences forestieres
 #'
 #' Pipeline de bout en bout : charge l'AOI, telecharge les donnees IGN
-#' (ortho RVB, IRC, MNT), combine les bandes, telecharge le modele MAESTRO,
-#' decoupe en patches, execute l'inference et exporte les resultats.
+#' (ortho RVB, IRC, DEM), combine les bandes, telecharge le modele MAESTRO,
+#' decoupe en patches, execute l'inference multi-modale et exporte les resultats.
+#'
+#' Le modele MAESTRO attend des entrees multi-modales separees :
+#'   - aerial : RGBI 4 bandes (0.2m)
+#'   - dem    : DSM+DTM 2 bandes (1m, resample 0.2m)
 #'
 #' @param aoi_path Chemin vers le fichier GeoPackage de la zone d'interet
 #' @param output_dir Repertoire de sortie (defaut: `"outputs"`)
@@ -37,44 +41,52 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               token = NULL) {
   message("========================================================")
   message(" MAESTRO - Reconnaissance des essences forestieres")
-  message(" Modele IGNF via Hugging Face (hfhub)")
-  message(" Donnees ortho + MNT via Geoplateforme IGN (WMS-R)")
+  message(" Modele IGNF multi-modal (aerial + DEM)")
+  message(" Donnees ortho + DEM via Geoplateforme IGN (WMS-R)")
   message("========================================================\n")
 
   # 1. Charger l'AOI
   aoi <- load_aoi(aoi_path)
 
-  # 2. Telecharger les donnees IGN
+  # 2. Telecharger les ortho IGN
   ortho <- download_ortho_for_aoi(
     aoi, output_dir,
     millesime_ortho = millesime_ortho,
     millesime_irc = millesime_irc
   )
 
-  # 3. Combiner RVB + IRC -> RGBI
+  # 3. Combiner RVB + IRC -> RGBI (4 bandes)
   rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
 
   rgbi_path <- file.path(output_dir, "ortho_rgbi.tif")
   terra::writeRaster(rgbi, rgbi_path, overwrite = TRUE)
   message(sprintf("RGBI sauvegarde: %s", rgbi_path))
 
-  # 4. Telecharger le MNT
-  mnt_data <- download_mnt_for_aoi(aoi, output_dir, rgbi = rgbi)
+  # 4. Telecharger le DEM (DSM + DTM, 2 bandes)
+  dem_data <- download_dem_for_aoi(aoi, output_dir, rgbi = rgbi)
 
-  # 5. Combiner RGBI + MNT -> 5 bandes
-  if (!is.null(mnt_data)) {
-    image_finale <- combine_rgbi_mnt(rgbi, mnt_data$mnt)
-    n_bands <- 5L
+  # Preparer les modalites disponibles
+  modalites <- list(aerial = rgbi)
+  modalites_noms <- c("aerial")
+
+  if (!is.null(dem_data)) {
+    dem <- aligner_dem_sur_rgbi(dem_data$dem, rgbi)
+    modalites$dem <- dem
+    modalites_noms <- c(modalites_noms, "dem")
+    message(sprintf("  DEM: %d bandes (source DSM: %s)",
+                     terra::nlyr(dem), dem_data$dsm_source))
   } else {
-    message("  MNT non disponible, utilisation des 4 bandes RGBI seules")
-    image_finale <- rgbi
-    n_bands <- 4L
+    message("  DEM non disponible, utilisation de aerial seul")
   }
 
-  finale_path <- file.path(output_dir, "image_finale.tif")
-  terra::writeRaster(image_finale, finale_path, overwrite = TRUE,
-                     gdal = c("COMPRESS=LZW"))
-  message(sprintf("Image finale: %s (%d bandes)", finale_path, n_bands))
+  # 5. Sauvegarder les rasters pour reference
+  for (mod_name in names(modalites)) {
+    mod_path <- file.path(output_dir, sprintf("modalite_%s.tif", mod_name))
+    terra::writeRaster(modalites[[mod_name]], mod_path, overwrite = TRUE,
+                       gdal = c("COMPRESS=LZW"))
+    message(sprintf("  %s: %s (%d bandes)", mod_name, mod_path,
+                     terra::nlyr(modalites[[mod_name]])))
+  }
 
   # 6. Telecharger le modele
   fichiers_modele <- telecharger_modele(model_id, token)
@@ -86,13 +98,14 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
   taille_patch_m <- patch_size * resolution
   grille <- creer_grille_patches(aoi, taille_patch_m)
 
-  # 9. Extraire les patches
-  patches_data <- extraire_patches_raster(image_finale, grille, patch_size)
+  # 9. Extraire les patches (multi-modal)
+  patches_multimodal <- extraire_patches_multimodal(modalites, grille, patch_size)
 
-  # 10. Inference
-  predictions <- executer_inference(
-    patches_data, fichiers_modele,
-    n_classes = 13L, n_bands = n_bands,
+  # 10. Inference multi-modale
+  predictions <- executer_inference_multimodal(
+    patches_multimodal, fichiers_modele,
+    n_classes = 13L,
+    modalites = modalites_noms,
     utiliser_gpu = gpu
   )
 
@@ -105,6 +118,7 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
 
   message("\n========================================================")
   message(" Traitement termine !")
+  message(sprintf(" Modalites utilisees: %s", paste(modalites_noms, collapse = " + ")))
   message(sprintf(" Resultats dans : %s/", output_dir))
   message("========================================================")
 

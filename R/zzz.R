@@ -8,8 +8,10 @@
 .ign_config$LAYER_ORTHO  <- "ORTHOIMAGERY.ORTHOPHOTOS"
 .ign_config$LAYER_IRC    <- "ORTHOIMAGERY.ORTHOPHOTOS.IRC"
 .ign_config$LAYER_MNT    <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
+.ign_config$LAYER_MNS    <- "IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93"
 .ign_config$WMS_MAX_PX   <- 4096L
 .ign_config$RES_IGN      <- 0.2
+.ign_config$RES_DEM      <- 1.0
 
 #' @importFrom utils read.csv write.csv
 NULL

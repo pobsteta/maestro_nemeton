@@ -367,3 +367,116 @@ download_mnt_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
   names(mnt) <- "MNT"
   list(mnt = mnt, mnt_path = mnt_path)
 }
+
+#' Telecharger le DEM 2 bandes (DSM + DTM) pour une AOI
+#'
+#' Telecharge le Modele Numerique de Terrain (DTM/MNT) et le Modele Numerique
+#' de Surface (DSM/MNS) depuis la Geoplateforme IGN via WMS-R.
+#' Le DTM provient du RGE ALTI 1m (couverture nationale).
+#' Le DSM provient du LiDAR HD (couverture partielle, fallback = DTM duplique).
+#'
+#' Le modele MAESTRO attend un DEM a 2 canaux : (DSM, DTM).
+#'
+#' @param aoi sf object en Lambert-93
+#' @param output_dir Repertoire de sortie
+#' @param rgbi SpatRaster de reference pour le reechantillonnage a 0.2m
+#'   (NULL = garder la resolution native 1m)
+#' @return Liste avec `dem` (SpatRaster 2 bandes DSM+DTM), `dem_path`,
+#'   `dsm_source` ("lidar_hd" ou "dtm_copie"), ou NULL si echec
+#' @export
+download_dem_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
+  fs::dir_create(output_dir)
+
+  dem_path <- file.path(output_dir, "dem_2bands.tif")
+
+  # Cache
+  if (file.exists(dem_path)) {
+    message("\n=== DEM 2 bandes deja telecharge (cache) ===")
+    dem <- terra::rast(dem_path)
+    dsm_source <- if (terra::nlyr(dem) >= 2) "cache" else "cache"
+    return(list(dem = dem, dem_path = dem_path, dsm_source = dsm_source))
+  }
+
+  bbox <- as.numeric(sf::st_bbox(sf::st_union(aoi)))
+  aoi_vect <- terra::vect(sf::st_union(aoi))
+
+  # --- DTM (MNT) : couverture nationale RGE ALTI 1m ---
+  message(sprintf("\n=== Telechargement DEM MAESTRO (DSM + DTM) ==="))
+  message("--- DTM (MNT) : RGE ALTI 1m ---")
+
+  dtm <- tryCatch(
+    download_ign_tiled(bbox, layer = .ign_config$LAYER_MNT,
+                        res_m = .ign_config$RES_DEM,
+                        output_dir = output_dir, prefix = "dtm",
+                        styles = "normal"),
+    error = function(e) { message("  DTM non telecharge: ", e$message); NULL }
+  )
+
+  if (is.null(dtm)) {
+    warning("Aucune donnee DTM telechargee.")
+    return(NULL)
+  }
+
+  dtm <- terra::crop(dtm, aoi_vect)
+  names(dtm) <- "DTM"
+
+  # --- DSM (MNS) : LiDAR HD (couverture partielle) ---
+  message("--- DSM (MNS) : LiDAR HD ---")
+  dsm_source <- "dtm_copie"
+
+  dsm <- tryCatch({
+    r <- download_ign_tiled(bbox, layer = .ign_config$LAYER_MNS,
+                             res_m = .ign_config$RES_DEM,
+                             output_dir = output_dir, prefix = "dsm",
+                             styles = "normal")
+    r <- terra::crop(r, aoi_vect)
+    if (validate_wms_data(r, min_pct = 10)) {
+      dsm_source <- "lidar_hd"
+      r
+    } else {
+      message("  DSM LiDAR HD: couverture insuffisante, utilisation du DTM")
+      NULL
+    }
+  }, error = function(e) {
+    message("  DSM LiDAR HD non disponible: ", e$message)
+    message("  Fallback: duplication du DTM comme DSM")
+    NULL
+  })
+
+  if (is.null(dsm)) {
+    dsm <- dtm
+    dsm_source <- "dtm_copie"
+    message("  DSM = copie du DTM (pas de LiDAR HD disponible)")
+  }
+  names(dsm) <- "DSM"
+
+  # Reechantillonnage sur la grille RGBI si fourni
+  if (!is.null(rgbi)) {
+    message("Reechantillonnage DEM de 1m vers 0.2m...")
+    dtm <- terra::resample(dtm, rgbi, method = "bilinear")
+    dsm <- terra::resample(dsm, rgbi, method = "bilinear")
+  }
+
+  # Empiler DSM + DTM (2 bandes, dans cet ordre pour MAESTRO)
+  dem <- c(dsm, dtm)
+  names(dem) <- c("DSM", "DTM")
+
+  terra::writeRaster(dem, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+
+  dtm_vals <- terra::values(dtm, na.rm = TRUE)
+  if (length(dtm_vals) > 0 && any(is.finite(dtm_vals))) {
+    message(sprintf("  Altitude DTM: %.0f - %.0f m",
+                     min(dtm_vals, na.rm = TRUE), max(dtm_vals, na.rm = TRUE)))
+  }
+  message(sprintf("  Source DSM: %s", dsm_source))
+  message(sprintf("DEM: %s (%d x %d px, %d bandes)",
+                   dem_path, terra::ncol(dem), terra::nrow(dem), terra::nlyr(dem)))
+
+  # Cleanup
+  tile_files <- fs::dir_ls(output_dir, glob = "d[ts]m_tile_*.tif")
+  if (length(tile_files) > 0) fs::file_delete(tile_files)
+
+  dem <- terra::rast(dem_path)
+  names(dem) <- c("DSM", "DTM")
+  list(dem = dem, dem_path = dem_path, dsm_source = dsm_source)
+}

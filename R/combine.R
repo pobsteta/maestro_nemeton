@@ -51,3 +51,20 @@ combine_rgbi_mnt <- function(rgbi, mnt) {
                    terra::nlyr(rgbi_mnt)))
   rgbi_mnt
 }
+
+#' Aligner le DEM 2 bandes (DSM+DTM) sur la grille RGBI
+#'
+#' Reechantillonne le DEM (2 bandes : DSM, DTM) sur la grille de l'image
+#' RGBI aerienne. Utilisee pour preparer les entrees multi-modales MAESTRO.
+#'
+#' @param dem SpatRaster 2 bandes (DSM, DTM)
+#' @param rgbi SpatRaster de reference (meme emprise/resolution)
+#' @return SpatRaster 2 bandes (DSM, DTM) alignees sur la grille RGBI
+#' @export
+aligner_dem_sur_rgbi <- function(dem, rgbi) {
+  if (!terra::compareGeom(dem, rgbi, stopOnError = FALSE)) {
+    message("  Reechantillonnage DEM sur la grille RGBI...")
+    dem <- terra::resample(dem, rgbi, method = "bilinear")
+  }
+  dem
+}

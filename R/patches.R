@@ -118,3 +118,93 @@ extraire_patches_raster <- function(r, grille, taille_pixels = 250) {
   message(sprintf("  Total patches extraits : %d", length(patches_data)))
   patches_data
 }
+
+#' Extraire les patches multi-modaux depuis plusieurs SpatRasters
+#'
+#' Pour chaque patch de la grille, extrait les valeurs de chaque modalite
+#' (aerial, dem, etc.) separement. Les donnees sont structurees pour etre
+#' passees au modele MAESTRO multi-modal.
+#'
+#' @param modalites Liste nommee de SpatRasters (ex: `list(aerial=..., dem=...)`)
+#' @param grille sf grille de patches (issue de [creer_grille_patches()])
+#' @param taille_pixels Taille cible de chaque patch en pixels (defaut: 250)
+#' @return Liste de listes nommees, chaque element contient les matrices
+#'   (H*W x C) pour chaque modalite. Ex: `patches[[i]]$aerial`, `patches[[i]]$dem`
+#' @export
+extraire_patches_multimodal <- function(modalites, grille, taille_pixels = 250) {
+  message("=== Extraction des patches multi-modaux ===")
+  message(sprintf("  Modalites: %s", paste(names(modalites), collapse = ", ")))
+
+  n_patches <- nrow(grille)
+  patches <- vector("list", n_patches)
+  skipped <- 0L
+
+  # Utiliser la premiere modalite comme reference pour les emprises
+  ref_raster <- modalites[[1]]
+  ext_raster <- terra::ext(ref_raster)
+
+  for (i in seq_len(n_patches)) {
+    ext_patch <- terra::ext(sf::st_bbox(grille[i, ]))
+
+    # Verifier que le patch chevauche le raster
+    overlap <- !(ext_patch$xmin >= ext_raster$xmax ||
+                 ext_patch$xmax <= ext_raster$xmin ||
+                 ext_patch$ymin >= ext_raster$ymax ||
+                 ext_patch$ymax <= ext_raster$ymin)
+
+    if (!overlap) {
+      patch_data <- list()
+      for (mod_name in names(modalites)) {
+        n_bands <- terra::nlyr(modalites[[mod_name]])
+        patch_data[[mod_name]] <- matrix(NA_real_,
+                                          nrow = taille_pixels * taille_pixels,
+                                          ncol = n_bands)
+      }
+      patches[[i]] <- patch_data
+      skipped <- skipped + 1L
+      next
+    }
+
+    patch_data <- list()
+    for (mod_name in names(modalites)) {
+      r <- modalites[[mod_name]]
+
+      crop_result <- tryCatch(
+        terra::crop(r, ext_patch),
+        error = function(e) NULL
+      )
+
+      if (is.null(crop_result)) {
+        n_bands <- terra::nlyr(r)
+        patch_data[[mod_name]] <- matrix(NA_real_,
+                                          nrow = taille_pixels * taille_pixels,
+                                          ncol = n_bands)
+        next
+      }
+
+      if (terra::ncol(crop_result) != taille_pixels ||
+          terra::nrow(crop_result) != taille_pixels) {
+        template <- terra::rast(
+          ext = ext_patch,
+          nrows = taille_pixels, ncols = taille_pixels,
+          crs = terra::crs(r),
+          nlyrs = terra::nlyr(r)
+        )
+        crop_result <- terra::resample(crop_result, template, method = "bilinear")
+      }
+
+      patch_data[[mod_name]] <- terra::values(crop_result)
+    }
+    patches[[i]] <- patch_data
+
+    if (i %% 100 == 0 || i == n_patches) {
+      message(sprintf("  Patches extraits : %d / %d", i, n_patches))
+    }
+  }
+
+  if (skipped > 0L) {
+    message(sprintf("  Patches hors emprise raster (ignores) : %d", skipped))
+  }
+  message(sprintf("  Total patches extraits : %d", length(patches)))
+  patches
+}
