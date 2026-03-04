@@ -24,6 +24,9 @@ Imports:
     jsonlite,
     reticulate
 Suggests:
+    ggplot2,
+    patchwork,
+    scales,
     hfhub,
     optparse,
     testthat (>= 3.0.0)
