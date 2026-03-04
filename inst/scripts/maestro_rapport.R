@@ -4,13 +4,17 @@
 # Pipeline complet MAESTRO : telechargement, inference, carte des essences
 # et generation du rapport graphique PDF avec patchwork.
 #
-# Utilisation dans RStudio :
+# Utilisation dans RStudio (rapport sans inference) :
 #   source("inst/scripts/maestro_rapport.R")
 #
-# Ou en ligne de commande :
+# Avec inference (necessite Python + PyTorch) :
+#   lancer_inference <- TRUE; source("inst/scripts/maestro_rapport.R")
+#
+# En ligne de commande :
 #   Rscript inst/scripts/maestro_rapport.R
+#   Rscript inst/scripts/maestro_rapport.R --inference
+#   Rscript inst/scripts/maestro_rapport.R --inference --gpu
 #   Rscript inst/scripts/maestro_rapport.R --millesime 2023
-#   Rscript inst/scripts/maestro_rapport.R --gpu
 # =============================================================================
 
 # --- Packages requis ---
@@ -51,9 +55,11 @@ for (i in seq_along(args)) {
     millesime <- as.integer(args[i + 1])
   }
   if (args[i] == "--gpu") utiliser_gpu <- TRUE
+  if (args[i] == "--inference") lancer_inference <- TRUE
   if (args[i] == "--aoi" && i < length(args)) aoi_path <- args[i + 1]
   if (args[i] == "--output" && i < length(args)) output_dir <- args[i + 1]
 }
+if (!exists("lancer_inference")) lancer_inference <- FALSE
 
 dossier_rapport <- file.path(output_dir, "rapport")
 dir.create(dossier_rapport, showWarnings = FALSE, recursive = TRUE)
@@ -118,37 +124,42 @@ resolution <- 0.2
 taille_patch_m <- patch_size * resolution
 grille <- creer_grille_patches(aoi, taille_patch_m)
 
-# --- 1g. Inference (si Python disponible) ---
+# --- 1g. Inference (opt-in avec --inference) ---
 inference_ok <- FALSE
 resultats <- NULL
 
-tryCatch({
-  message("\n=== Telechargement du modele ===")
-  fichiers_modele <- telecharger_modele("IGNF/MAESTRO_FLAIR-HUB_base")
+if (lancer_inference) {
+  tryCatch({
+    message("\n=== Telechargement du modele ===")
+    fichiers_modele <- telecharger_modele("IGNF/MAESTRO_FLAIR-HUB_base")
 
-  message("\n=== Configuration Python ===")
-  configurer_python()
+    message("\n=== Configuration Python ===")
+    configurer_python()
 
-  message("\n=== Extraction des patches ===")
-  patches_data <- extraire_patches_raster(image_finale, grille, patch_size)
+    message("\n=== Extraction des patches ===")
+    patches_data <- extraire_patches_raster(image_finale, grille, patch_size)
 
-  message("\n=== Inference MAESTRO ===")
-  predictions <- executer_inference(
-    patches_data, fichiers_modele,
-    n_classes = 13L, n_bands = n_bands,
-    utiliser_gpu = utiliser_gpu
-  )
+    message("\n=== Inference MAESTRO ===")
+    predictions <- executer_inference(
+      patches_data, fichiers_modele,
+      n_classes = 13L, n_bands = n_bands,
+      utiliser_gpu = utiliser_gpu
+    )
 
-  message("\n=== Assemblage des resultats ===")
-  resultats <- assembler_resultats(grille, predictions, dossier_sortie = output_dir)
-  raster_carte <- creer_carte_raster(resultats, resolution, output_dir)
-  inference_ok <- TRUE
+    message("\n=== Assemblage des resultats ===")
+    resultats <- assembler_resultats(grille, predictions, dossier_sortie = output_dir)
+    raster_carte <- creer_carte_raster(resultats, resolution, output_dir)
+    inference_ok <- TRUE
 
-}, error = function(e) {
-  message("\n[INFO] Inference non disponible : ", e$message)
-  message("  Le rapport sera genere sans la carte des essences.")
-  message("  Pour activer l'inference, installez PyTorch dans l'env conda 'maestro'.")
-})
+  }, error = function(e) {
+    message("\n[INFO] Inference echouee : ", e$message)
+    message("  Le rapport sera genere sans la carte des essences.")
+  })
+} else {
+  message("\n=== Inference non demandee ===")
+  message("  Pour lancer l'inference, utilisez le flag --inference")
+  message("  ou definissez lancer_inference <- TRUE avant de sourcer le script")
+}
 
 # =============================================================================
 # ETAPE 2 : Construction des graphiques
