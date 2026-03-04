@@ -198,7 +198,8 @@ raster_to_df <- function(r, maxpix = 500000) {
 theme_carte <- theme_minimal(base_size = 10) +
   theme(
     axis.title = element_blank(),
-    axis.text = element_text(size = 6),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
     plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
     plot.subtitle = element_text(size = 8, hjust = 0.5, color = "grey40"),
     legend.position = "right"
