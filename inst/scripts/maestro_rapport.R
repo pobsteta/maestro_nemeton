@@ -2,7 +2,7 @@
 # =============================================================================
 # maestro_rapport.R
 # Pipeline complet MAESTRO : telechargement, inference, carte des essences
-# et generation du rapport graphique PDF avec patchwork.
+# et generation du rapport graphique PDF avec terra::plot (pattern FLAIR-HUB).
 #
 # Utilisation dans RStudio (rapport sans inference) :
 #   source("inst/scripts/maestro_rapport.R")
@@ -18,15 +18,13 @@
 # =============================================================================
 
 # --- Packages requis ---
-pkgs_requis <- c("ggplot2", "patchwork", "scales", "sf", "terra", "fs")
+pkgs_requis <- c("sf", "terra", "fs")
 for (pkg in pkgs_requis) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     stop(sprintf("Package '%s' requis. Installez-le avec : install.packages('%s')", pkg, pkg))
   }
 }
 
-library(ggplot2)
-library(patchwork)
 library(sf)
 library(terra)
 library(fs)
@@ -38,6 +36,159 @@ if (requireNamespace("maestro", quietly = TRUE)) {
   devtools::load_all(".")
 } else {
   stop("Le package 'maestro' n'est pas installe.")
+}
+
+# =============================================================================
+# Configuration : palettes et labels (pattern FLAIR-HUB)
+# =============================================================================
+
+# Palette de couleurs pour les 13 essences PureForest
+ESSENCES_COLORS <- c(
+  "#2ca02c",   # 0  Chene decidue  - vert fonce
+  "#98df8a",   # 1  Chene vert     - vert clair
+  "#ff7f0e",   # 2  Hetre          - orange
+  "#d62728",   # 3  Chataignier    - rouge
+  "#1f77b4",   # 4  Pin maritime   - bleu
+  "#aec7e8",   # 5  Pin sylvestre  - bleu clair
+  "#9467bd",   # 6  Pin laricio/noir - violet
+  "#c5b0d5",   # 7  Pin d'Alep     - violet clair
+  "#17becf",   # 8  Epicea         - cyan
+  "#006400",   # 9  Sapin          - vert sapin
+  "#8c564b",   # 10 Douglas        - brun
+  "#e377c2",   # 11 Meleze         - rose
+  "#bcbd22"    # 12 Peuplier       - jaune-vert
+)
+
+ESSENCES_LABELS <- c(
+  "Chene decidue", "Chene vert", "Hetre", "Chataignier",
+  "Pin maritime", "Pin sylvestre", "Pin laricio/noir", "Pin d'Alep",
+  "Epicea", "Sapin", "Douglas", "Meleze", "Peuplier"
+)
+
+# =============================================================================
+# Fonctions de visualisation (pattern FLAIR-HUB : terra base R)
+# =============================================================================
+
+#' Visualiser une image en couleurs naturelles (RGB)
+#'
+#' @param raster_rgb SpatRaster avec au moins 3 bandes
+#' @param title Titre du graphique
+#' @param bands Indices des bandes RGB
+plot_rgb <- function(raster_rgb, title = "Image RGB", bands = c(1, 2, 3)) {
+  if (nlyr(raster_rgb) >= 3) {
+    plotRGB(raster_rgb, r = bands[1], g = bands[2], b = bands[3],
+            stretch = "lin", main = title, mar = c(2, 2, 3, 2))
+  } else {
+    plot(raster_rgb, main = title)
+  }
+}
+
+#' Visualiser le NDVI
+#'
+#' @param ndvi_raster SpatRaster du NDVI
+#' @param title Titre
+plot_ndvi <- function(ndvi_raster, title = "NDVI") {
+  col_ndvi <- colorRampPalette(
+    c("#d73027", "#fc8d59", "#fee08b", "#ffffbf",
+      "#d9ef8b", "#91cf60", "#1a9850", "#006837")
+  )(100)
+
+  plot(ndvi_raster, main = title, col = col_ndvi, range = c(-0.2, 1),
+       plg = list(title = "NDVI"))
+}
+
+#' Visualiser le MNT (DSM/DTM)
+#'
+#' @param dem_raster SpatRaster
+#' @param title Titre
+plot_mnt <- function(dem_raster, title = "MNT") {
+  col_elev <- colorRampPalette(
+    c("#313695", "#4575b4", "#74add1", "#abd9e9",
+      "#e0f3f8", "#ffffbf", "#fee090", "#fdae61",
+      "#f46d43", "#d73027", "#a50026")
+  )(100)
+
+  plot(dem_raster, main = title, col = col_elev,
+       plg = list(title = "Altitude (m)"))
+}
+
+#' Visualiser la carte des essences forestieres
+#'
+#' @param label_raster SpatRaster des classes d'essences
+#' @param title Titre
+plot_essences <- function(label_raster, title = "Essences forestieres") {
+  vals <- values(label_raster, na.rm = TRUE)
+  present_classes <- sort(unique(as.integer(vals)))
+
+  colors <- ESSENCES_COLORS[present_classes + 1]
+  labels <- ESSENCES_LABELS[present_classes + 1]
+
+  plot(label_raster, main = title, col = ESSENCES_COLORS,
+       type = "classes", levels = ESSENCES_LABELS,
+       plg = list(legend = labels, cex = 0.7))
+}
+
+#' Calculer le NDVI depuis une image RGBI
+#'
+#' NDVI = (PIR - Rouge) / (PIR + Rouge)
+#'
+#' @param rgbi_raster SpatRaster avec bandes Rouge (1) et PIR (4)
+#' @return SpatRaster du NDVI (valeurs entre -1 et 1)
+compute_ndvi <- function(rgbi_raster) {
+  pir <- rgbi_raster[[4]]
+  rouge <- rgbi_raster[[1]]
+  ndvi <- (pir - rouge) / (pir + rouge + 1e-10)
+  names(ndvi) <- "NDVI"
+
+  vals <- values(ndvi, na.rm = TRUE)
+  message(sprintf("NDVI calcule: min=%.3f, max=%.3f, moy=%.3f",
+                   min(vals), max(vals), mean(vals)))
+  return(ndvi)
+}
+
+#' Statistiques de repartition des essences
+#'
+#' @param label_raster SpatRaster des classes d'essences
+#' @return data.frame avec distribution des classes
+compute_essences_stats <- function(label_raster) {
+  vals <- values(label_raster, na.rm = TRUE)
+  total <- length(vals)
+
+  class_counts <- table(as.integer(vals))
+  class_ids <- as.integer(names(class_counts))
+
+  stats <- data.frame(
+    class_id = class_ids,
+    label = ESSENCES_LABELS[class_ids + 1],
+    n_pixels = as.integer(class_counts),
+    pct = round(as.numeric(class_counts) / total * 100, 2),
+    stringsAsFactors = FALSE
+  )
+
+  stats <- stats[order(-stats$pct), ]
+
+  message("=== Distribution des essences forestieres ===")
+  message(sprintf("  Total: %d pixels", total))
+  for (i in seq_len(min(nrow(stats), 13))) {
+    message(sprintf("  %2d. %s: %.1f%%",
+                     stats$class_id[i], stats$label[i], stats$pct[i]))
+  }
+
+  return(stats)
+}
+
+#' Creer un masque de vegetation a partir du NDVI
+#'
+#' @param ndvi_raster SpatRaster du NDVI
+#' @param threshold Seuil NDVI pour considerer de la vegetation
+#' @return SpatRaster binaire (1 = vegetation)
+mask_vegetation <- function(ndvi_raster, threshold = 0.3) {
+  veg_mask <- ndvi_raster >= threshold
+  names(veg_mask) <- "vegetation"
+
+  pct <- sum(values(veg_mask, na.rm = TRUE)) / sum(!is.na(values(veg_mask))) * 100
+  message(sprintf("Vegetation detectee (NDVI >= %.2f): %.1f%%", threshold, pct))
+  return(veg_mask)
 }
 
 # =============================================================================
@@ -80,6 +231,7 @@ message("========================================================\n")
 # --- 1a. Charger l'AOI ---
 message("=== Chargement de l'AOI ===")
 aoi <- load_aoi(aoi_path)
+aoi_vect <- vect(aoi)
 bbox <- st_bbox(aoi)
 message(sprintf("  AOI : %s", basename(aoi_path)))
 message(sprintf("  Emprise : %.0f x %.0f m",
@@ -127,6 +279,7 @@ grille <- creer_grille_patches(aoi, taille_patch_m)
 # --- 1g. Inference (opt-in avec --inference) ---
 inference_ok <- FALSE
 resultats <- NULL
+raster_carte <- NULL
 
 if (lancer_inference) {
   tryCatch({
@@ -162,230 +315,133 @@ if (lancer_inference) {
 }
 
 # =============================================================================
-# ETAPE 2 : Construction des graphiques
+# ETAPE 2 : Calculs d'indices spectraux
+# =============================================================================
+
+message("\n========================================================")
+message(" CALCUL DES INDICES SPECTRAUX")
+message("========================================================\n")
+
+# NDVI
+ndvi <- compute_ndvi(image_finale)
+
+# Masque vegetation
+veg_mask <- mask_vegetation(ndvi)
+
+# MNT
+mnt_raster <- if (!is.null(mnt_data)) mnt_data$mnt else image_finale[[n_bands]]
+
+# =============================================================================
+# ETAPE 3 : Generation du rapport PDF (pattern FLAIR-HUB : terra base R)
 # =============================================================================
 
 message("\n========================================================")
 message(" GENERATION DU RAPPORT GRAPHIQUE")
 message("========================================================\n")
 
-# --- Fonctions utilitaires ---
-raster_to_rgb_df <- function(r, maxpix = 500000) {
-  ncells <- ncell(r)
-  if (ncells > maxpix) {
-    fact <- ceiling(sqrt(ncells / maxpix))
-    r <- aggregate(r, fact = fact, fun = "mean")
-  }
-  coords <- xyFromCell(r, 1:ncell(r))
-  vals <- values(r)
-  df <- data.frame(x = coords[, 1], y = coords[, 2])
-  if (ncol(vals) >= 3) {
-    rv <- vals[, 1]; gv <- vals[, 2]; bv <- vals[, 3]
-    rv[is.na(rv)] <- 0; gv[is.na(gv)] <- 0; bv[is.na(bv)] <- 0
-    # Normaliser en 0-1
-    if (max(rv, na.rm = TRUE) > 1) rv <- rv / 255
-    if (max(gv, na.rm = TRUE) > 1) gv <- gv / 255
-    if (max(bv, na.rm = TRUE) > 1) bv <- bv / 255
-    rv <- pmin(pmax(rv, 0), 1)
-    gv <- pmin(pmax(gv, 0), 1)
-    bv <- pmin(pmax(bv, 0), 1)
-    df$hex <- rgb(rv, gv, bv)
-  }
-  df
-}
+pdf_path <- file.path(dossier_rapport, "rapport_maestro.pdf")
+pdf(pdf_path, width = 16, height = 12)
 
-raster_to_df <- function(r, maxpix = 500000) {
-  ncells <- ncell(r)
-  if (ncells > maxpix) {
-    fact <- ceiling(sqrt(ncells / maxpix))
-    r <- aggregate(r, fact = fact, fun = "mean")
-  }
-  coords <- xyFromCell(r, 1:ncell(r))
-  vals <- values(r)[, 1]
-  data.frame(x = coords[, 1], y = coords[, 2], val = vals)
-}
+# --- Page 1 : Comparaison multi-modalites ---
+message("  Page 1/3 : Donnees d'entree...")
 
-# --- Theme commun ---
-theme_carte <- theme_minimal(base_size = 10) +
-  theme(
-    axis.title = element_blank(),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
-    plot.subtitle = element_text(size = 8, hjust = 0.5, color = "grey40"),
-    legend.position = "right"
-  )
+par(mfrow = c(2, 3), mar = c(2, 2, 3, 4),
+    oma = c(0, 0, 3, 0))
 
-# --- 1. Orthophoto RVB ---
-message("  1/7 Orthophoto RVB...")
-df_rvb <- raster_to_rgb_df(ortho$rvb)
-df_rvb <- df_rvb[complete.cases(df_rvb), ]
+# 1. Orthophoto RVB
+plot_rgb(ortho$rvb, title = sprintf("Orthophoto RVB (%.1f m)", res(ortho$rvb)[1]))
+lines(aoi_vect, col = "red", lwd = 2)
 
-p_rvb <- ggplot(df_rvb, aes(x = x, y = y, fill = hex)) +
-  geom_raster() +
-  scale_fill_identity() +
-  geom_sf(data = aoi, fill = NA, color = "red", linewidth = 0.6, inherit.aes = FALSE) +
-  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-           ylim = c(bbox["ymin"], bbox["ymax"]),
-           crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-  labs(title = "Orthophoto RVB",
-       subtitle = sprintf("%.1f m | %d x %d px",
-                          res(ortho$rvb)[1], ncol(ortho$rvb), nrow(ortho$rvb))) +
-  theme_carte
+# 2. Infrarouge couleur (IRC)
+plot_rgb(ortho$irc, title = sprintf("Infrarouge couleur IRC (%.1f m)", res(ortho$irc)[1]))
+lines(aoi_vect, col = "yellow", lwd = 2)
 
-# --- 2. Infrarouge couleur ---
-message("  2/7 Infrarouge couleur...")
-df_irc <- raster_to_rgb_df(ortho$irc)
-df_irc <- df_irc[complete.cases(df_irc), ]
+# 3. MNT
+plot_mnt(mnt_raster, title = "Modele Numerique de Terrain")
+lines(aoi_vect, col = "black", lwd = 2)
 
-p_irc <- ggplot(df_irc, aes(x = x, y = y, fill = hex)) +
-  geom_raster() +
-  scale_fill_identity() +
-  geom_sf(data = aoi, fill = NA, color = "yellow", linewidth = 0.6, inherit.aes = FALSE) +
-  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-           ylim = c(bbox["ymin"], bbox["ymax"]),
-           crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-  labs(title = "Infrarouge couleur (IRC)",
-       subtitle = sprintf("%.1f m | %d x %d px",
-                          res(ortho$irc)[1], ncol(ortho$irc), nrow(ortho$irc))) +
-  theme_carte
+# 4. NDVI
+plot_ndvi(ndvi, title = "Indice de vegetation (NDVI)")
+lines(aoi_vect, col = "black", lwd = 2)
 
-# --- 3. MNT ---
-message("  3/7 MNT...")
-mnt_raster <- if (!is.null(mnt_data)) mnt_data$mnt else image_finale[[n_bands]]
-df_mnt <- raster_to_df(mnt_raster)
-df_mnt <- df_mnt[complete.cases(df_mnt), ]
+# 5. Masque vegetation
+plot(veg_mask, main = "Vegetation (NDVI >= 0.3)",
+     col = c("white", "#1a9850"), legend = FALSE)
+lines(aoi_vect, col = "black", lwd = 2)
+legend("bottomright", legend = c("Non-veg", "Vegetation"),
+       fill = c("white", "#1a9850"), cex = 0.8)
 
-p_mnt <- ggplot(df_mnt, aes(x = x, y = y, fill = val)) +
-  geom_raster() +
-  geom_sf(data = aoi, fill = NA, color = "black", linewidth = 0.6, inherit.aes = FALSE) +
-  scale_fill_gradientn(name = "Alt. (m)",
-                       colours = terrain.colors(20),
-                       na.value = "transparent") +
-  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-           ylim = c(bbox["ymin"], bbox["ymax"]),
-           crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-  labs(title = "Modele Numerique de Terrain",
-       subtitle = sprintf("%.0f - %.0f m",
-                          min(df_mnt$val, na.rm = TRUE),
-                          max(df_mnt$val, na.rm = TRUE))) +
-  theme_carte
+# 6. Grille de patches
+plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
+        main = sprintf("Grille de patches (%d x %g m)", nrow(grille), taille_patch_m))
+lines(vect(grille), col = "blue", lwd = 0.5)
+lines(aoi_vect, col = "red", lwd = 2)
 
-# --- 4. NDVI ---
-message("  4/7 NDVI...")
-pir <- image_finale[[4]]
-rouge <- image_finale[[1]]
-ndvi <- (pir - rouge) / (pir + rouge + 1e-10)
-df_ndvi <- raster_to_df(ndvi)
-df_ndvi <- df_ndvi[complete.cases(df_ndvi), ]
+mtext("MAESTRO - Donnees d'entree", outer = TRUE, cex = 1.5, font = 2)
+mtext(sprintf("AOI : %s | Date : %s | Emprise : %.0f x %.0f m",
+              basename(aoi_path), Sys.Date(),
+              bbox["xmax"] - bbox["xmin"], bbox["ymax"] - bbox["ymin"]),
+      outer = TRUE, line = -1, cex = 0.9, col = "grey30")
 
-p_ndvi <- ggplot(df_ndvi, aes(x = x, y = y, fill = val)) +
-  geom_raster() +
-  geom_sf(data = aoi, fill = NA, color = "black", linewidth = 0.6, inherit.aes = FALSE) +
-  scale_fill_gradientn(
-    name = "NDVI",
-    colours = c("#d73027", "#fee08b", "#1a9850", "#006837"),
-    limits = c(-0.2, 1), oob = scales::squish, na.value = "transparent"
-  ) +
-  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-           ylim = c(bbox["ymin"], bbox["ymax"]),
-           crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-  labs(title = "Indice de vegetation (NDVI)",
-       subtitle = "Bandes Rouge et PIR") +
-  theme_carte
+# --- Page 2 : Carte des essences ---
+message("  Page 2/3 : Carte des essences...")
 
-# --- 5. Grille de patches ---
-message("  5/7 Grille de patches...")
+if (inference_ok && !is.null(raster_carte)) {
+  par(mfrow = c(1, 1), mar = c(2, 2, 4, 6), oma = c(0, 0, 2, 0))
 
-p_grille <- ggplot() +
-  geom_raster(data = df_rvb, aes(x = x, y = y, fill = hex), alpha = 0.5) +
-  scale_fill_identity() +
-  geom_sf(data = grille, fill = NA, color = "blue", linewidth = 0.3) +
-  geom_sf(data = aoi, fill = NA, color = "red", linewidth = 0.8) +
-  coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-           ylim = c(bbox["ymin"], bbox["ymax"]),
-           crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-  labs(title = "Grille de patches",
-       subtitle = sprintf("%d patches de %g m", nrow(grille), taille_patch_m)) +
-  theme_carte
+  plot_essences(raster_carte,
+                title = sprintf("Carte des essences forestieres - %d patches classifies",
+                                nrow(grille)))
+  lines(aoi_vect, col = "black", lwd = 2)
 
-# --- 6. Carte des essences (ou placeholder) ---
-message("  6/7 Carte des essences...")
+  mtext("MAESTRO - Reconnaissance des essences", outer = TRUE, cex = 1.5, font = 2)
 
-# Palette de couleurs pour les 13 essences PureForest
-ess <- essences_pureforest()
-palette_essences <- c(
-  "Chene decidue"  = "#2ca02c",   # vert fonce
-  "Chene vert"     = "#98df8a",   # vert clair
-  "Hetre"          = "#ff7f0e",   # orange
-  "Chataignier"    = "#d62728",   # rouge
-  "Pin maritime"   = "#1f77b4",   # bleu
-  "Pin sylvestre"  = "#aec7e8",   # bleu clair
-  "Pin laricio/noir" = "#9467bd", # violet
-  "Pin d'Alep"     = "#c5b0d5",   # violet clair
-  "Epicea"         = "#17becf",   # cyan
-  "Sapin"          = "#006400",   # vert sapin
-  "Douglas"        = "#8c564b",   # brun
-  "Meleze"         = "#e377c2",   # rose
-  "Peuplier"       = "#bcbd22"    # jaune-vert
-)
-
-if (inference_ok && !is.null(resultats)) {
-  p_essences <- ggplot() +
-    geom_sf(data = resultats, aes(fill = classe), color = NA) +
-    geom_sf(data = aoi, fill = NA, color = "black", linewidth = 0.8) +
-    scale_fill_manual(name = "Essence", values = palette_essences, drop = TRUE) +
-    coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-             ylim = c(bbox["ymin"], bbox["ymax"]),
-             crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-    labs(title = "Carte des essences forestieres",
-         subtitle = sprintf("Modele MAESTRO - %d patches classifies", nrow(resultats))) +
-    theme_carte +
-    theme(legend.text = element_text(size = 7),
-          legend.key.size = unit(0.4, "cm"))
 } else {
-  p_essences <- ggplot() +
-    geom_sf(data = grille, fill = "grey80", color = "grey60", linewidth = 0.2) +
-    geom_sf(data = aoi, fill = NA, color = "red", linewidth = 0.8) +
-    coord_sf(xlim = c(bbox["xmin"], bbox["xmax"]),
-             ylim = c(bbox["ymin"], bbox["ymax"]),
-             crs = sf::st_crs(2154), default_crs = sf::st_crs(2154)) +
-    annotate("label", x = mean(c(bbox["xmin"], bbox["xmax"])),
-             y = mean(c(bbox["ymin"], bbox["ymax"])),
-             label = "Inference non executee\n(PyTorch requis)",
-             size = 3.5, fill = "white", alpha = 0.8) +
-    labs(title = "Carte des essences forestieres",
-         subtitle = "En attente d'inference") +
-    theme_carte
+  par(mfrow = c(1, 1), mar = c(2, 2, 4, 2), oma = c(0, 0, 2, 0))
+
+  # Afficher l'ortho en fond avec la grille
+  plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
+          main = "Carte des essences forestieres")
+  lines(vect(grille), col = "grey60", lwd = 0.3)
+  lines(aoi_vect, col = "red", lwd = 2)
+
+  # Message central
+  mid_x <- mean(c(bbox["xmin"], bbox["xmax"]))
+  mid_y <- mean(c(bbox["ymin"], bbox["ymax"]))
+  text(mid_x, mid_y, "Inference non executee\n(utilisez --inference)",
+       cex = 1.5, col = "red", font = 2)
+
+  mtext("MAESTRO - En attente d'inference", outer = TRUE, cex = 1.5, font = 2)
 }
 
-# --- 7. Statistiques (barplot ou resume) ---
-message("  7/7 Statistiques...")
+# --- Page 3 : Statistiques ---
+message("  Page 3/3 : Statistiques...")
 
-if (inference_ok && !is.null(resultats)) {
-  stats <- as.data.frame(table(resultats$classe))
-  names(stats) <- c("Essence", "N")
-  stats$Pct <- round(stats$N / sum(stats$N) * 100, 1)
-  stats <- stats[order(-stats$N), ]
+if (inference_ok && !is.null(raster_carte)) {
+  par(mfrow = c(1, 1), mar = c(5, 12, 4, 2), oma = c(0, 0, 2, 0))
 
-  p_stats <- ggplot(stats, aes(x = reorder(Essence, N), y = Pct, fill = Essence)) +
-    geom_col(show.legend = FALSE) +
-    geom_text(aes(label = sprintf("%.1f%%", Pct)), hjust = -0.1, size = 2.8) +
-    scale_fill_manual(values = palette_essences) +
-    coord_flip(clip = "off") +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
-    labs(title = "Repartition des essences",
-         subtitle = sprintf("%d patches | %d especes detectees",
-                            sum(stats$N), nrow(stats)),
-         x = NULL, y = "Proportion (%)") +
-    theme_minimal(base_size = 10) +
-    theme(
-      plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
-      plot.subtitle = element_text(size = 8, hjust = 0.5, color = "grey40"),
-      axis.text.y = element_text(size = 7)
-    )
+  stats <- compute_essences_stats(raster_carte)
+
+  barplot(stats$pct,
+          names.arg = stats$label,
+          horiz = TRUE,
+          las = 1,
+          col = ESSENCES_COLORS[stats$class_id + 1],
+          main = sprintf("Repartition des essences (%d especes detectees)", nrow(stats)),
+          xlab = "Proportion (%)",
+          cex.names = 0.8)
+
+  # Ajouter les pourcentages
+  text(stats$pct + 0.5, seq_along(stats$pct) * 1.2 - 0.5,
+       sprintf("%.1f%%", stats$pct), cex = 0.7, pos = 4)
+
+  mtext("MAESTRO - Statistiques", outer = TRUE, cex = 1.5, font = 2)
+
 } else {
-  # Resume textuel si pas d'inference
+  par(mfrow = c(1, 1), mar = c(2, 2, 4, 2), oma = c(0, 0, 2, 0))
+
+  # Resume textuel du pipeline
+  ess <- essences_pureforest()
   fichiers <- dir_ls(output_dir, type = "file", glob = "*.tif")
   info_lines <- sapply(fichiers, function(f) {
     sz <- file.info(f)$size
@@ -393,74 +449,117 @@ if (inference_ok && !is.null(resultats)) {
     sprintf("  %s  (%s)", basename(f), taille)
   })
 
-  resume_text <- paste0(
-    "MAESTRO - Resume du pipeline\n",
-    "==============================\n\n",
-    sprintf("AOI : %s\n", basename(aoi_path)),
-    sprintf("CRS : EPSG:2154 (Lambert-93)\n"),
-    sprintf("Emprise : %.0f x %.0f m\n",
+  resume <- c(
+    "MAESTRO - Resume du pipeline",
+    "==============================",
+    "",
+    sprintf("AOI : %s", basename(aoi_path)),
+    sprintf("CRS : EPSG:2154 (Lambert-93)"),
+    sprintf("Emprise : %.0f x %.0f m",
             bbox["xmax"] - bbox["xmin"], bbox["ymax"] - bbox["ymin"]),
-    sprintf("Resolution : %.1f m\n", res(ortho$rvb)[1]),
-    sprintf("Image finale : %d bandes\n", nlyr(image_finale)),
-    sprintf("  (%s)\n", paste(names(image_finale), collapse = ", ")),
-    sprintf("Patches : %d\n", nrow(grille)),
-    sprintf("Especes : %d classes PureForest\n", nrow(ess)),
-    "\n--- Fichiers generes ---\n",
-    paste(info_lines, collapse = "\n"),
-    "\n\n--- Inference ---\n",
-    "Non executee (PyTorch requis)\n",
-    "Relancez avec conda activate maestro"
+    sprintf("Resolution : %.1f m", res(ortho$rvb)[1]),
+    sprintf("Image finale : %d bandes (%s)", nlyr(image_finale),
+            paste(names(image_finale), collapse = ", ")),
+    sprintf("Patches : %d", nrow(grille)),
+    sprintf("Especes : %d classes PureForest", nrow(ess)),
+    "",
+    "--- Fichiers generes ---",
+    info_lines,
+    "",
+    "--- Inference ---",
+    "Non executee (PyTorch requis)",
+    "Relancez avec --inference"
   )
 
-  p_stats <- ggplot() +
-    annotate("text", x = 0, y = 0, label = resume_text,
-             hjust = 0, vjust = 1, family = "mono", size = 2.8, lineheight = 1.2) +
-    xlim(-0.1, 5) + ylim(-8, 0.5) +
-    labs(title = "Resume du pipeline") +
-    theme_void() +
-    theme(plot.title = element_text(face = "bold", size = 11, hjust = 0.5))
+  plot.new()
+  title(main = "Resume du pipeline", font.main = 2, cex.main = 1.4)
+  text(0.05, seq(0.95, by = -0.04, length.out = length(resume)),
+       resume, adj = 0, family = "mono", cex = 0.9)
+
+  mtext("MAESTRO - Resume", outer = TRUE, cex = 1.5, font = 2)
 }
 
-# =============================================================================
-# ETAPE 3 : Composition patchwork
-# =============================================================================
-
-message("\nAssemblage du rapport patchwork...")
-
-# Layout :
-#   Ligne 1 : RVB | IRC | MNT
-#   Ligne 2 : NDVI | Grille | Essences
-#   Ligne 3 (large) : Statistiques / barplot
-rapport <- (p_rvb | p_irc | p_mnt) /
-           (p_ndvi | p_grille | p_essences) /
-           p_stats +
-  plot_layout(heights = c(3, 3, 2)) +
-  plot_annotation(
-    title = "MAESTRO - Reconnaissance des essences forestieres",
-    subtitle = sprintf("AOI : %s | Date : %s | %d patches de %g m",
-                       basename(aoi_path), Sys.Date(), nrow(grille), taille_patch_m),
-    theme = theme(
-      plot.title = element_text(face = "bold", size = 15, hjust = 0.5),
-      plot.subtitle = element_text(size = 10, hjust = 0.5, color = "grey30")
-    )
-  )
-
-# =============================================================================
-# ETAPE 4 : Affichage RStudio + export PDF/PNG
-# =============================================================================
-
-message("Affichage dans RStudio...")
-print(rapport)
-
-# PDF
-pdf_path <- file.path(dossier_rapport, "rapport_maestro.pdf")
-ggsave(pdf_path, rapport, width = 16, height = 14, dpi = 150)
+dev.off()
 message(sprintf("  PDF : %s (%.1f Mo)", pdf_path, file.info(pdf_path)$size / 1e6))
 
-# PNG
+# --- Export PNG (page 1 uniquement) ---
+message("\nExport PNG de la page principale...")
 png_path <- file.path(dossier_rapport, "rapport_maestro.png")
-ggsave(png_path, rapport, width = 16, height = 14, dpi = 200)
+png(png_path, width = 1600, height = 1200, res = 100)
+
+par(mfrow = c(2, 3), mar = c(2, 2, 3, 4),
+    oma = c(0, 0, 3, 0))
+
+plot_rgb(ortho$rvb, title = sprintf("Orthophoto RVB (%.1f m)", res(ortho$rvb)[1]))
+lines(aoi_vect, col = "red", lwd = 2)
+
+plot_rgb(ortho$irc, title = sprintf("IRC (%.1f m)", res(ortho$irc)[1]))
+lines(aoi_vect, col = "yellow", lwd = 2)
+
+plot_mnt(mnt_raster, title = "MNT")
+lines(aoi_vect, col = "black", lwd = 2)
+
+plot_ndvi(ndvi, title = "NDVI")
+lines(aoi_vect, col = "black", lwd = 2)
+
+plot(veg_mask, main = "Vegetation (NDVI >= 0.3)",
+     col = c("white", "#1a9850"), legend = FALSE)
+lines(aoi_vect, col = "black", lwd = 2)
+
+if (inference_ok && !is.null(raster_carte)) {
+  plot_essences(raster_carte, title = "Essences forestieres")
+  lines(aoi_vect, col = "black", lwd = 2)
+} else {
+  plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
+          main = sprintf("Grille (%d patches)", nrow(grille)))
+  lines(vect(grille), col = "blue", lwd = 0.5)
+  lines(aoi_vect, col = "red", lwd = 2)
+}
+
+mtext("MAESTRO - Reconnaissance des essences forestieres", outer = TRUE, cex = 1.5, font = 2)
+mtext(sprintf("AOI : %s | %s | %d patches de %g m",
+              basename(aoi_path), Sys.Date(), nrow(grille), taille_patch_m),
+      outer = TRUE, line = -1, cex = 0.9, col = "grey30")
+
+dev.off()
 message(sprintf("  PNG : %s (%.1f Mo)", png_path, file.info(png_path)$size / 1e6))
+
+# --- Affichage dans RStudio si interactif ---
+if (interactive()) {
+  message("\nAffichage dans RStudio...")
+
+  par(mfrow = c(2, 3), mar = c(2, 2, 3, 4),
+      oma = c(0, 0, 3, 0))
+
+  plot_rgb(ortho$rvb, title = "Orthophoto RVB")
+  lines(aoi_vect, col = "red", lwd = 2)
+
+  plot_rgb(ortho$irc, title = "IRC")
+  lines(aoi_vect, col = "yellow", lwd = 2)
+
+  plot_mnt(mnt_raster, title = "MNT")
+  lines(aoi_vect, col = "black", lwd = 2)
+
+  plot_ndvi(ndvi, title = "NDVI")
+  lines(aoi_vect, col = "black", lwd = 2)
+
+  plot(veg_mask, main = "Vegetation (NDVI >= 0.3)",
+       col = c("white", "#1a9850"), legend = FALSE)
+  lines(aoi_vect, col = "black", lwd = 2)
+
+  if (inference_ok && !is.null(raster_carte)) {
+    plot_essences(raster_carte, title = "Essences forestieres")
+    lines(aoi_vect, col = "black", lwd = 2)
+  } else {
+    plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
+            main = sprintf("Grille (%d patches)", nrow(grille)))
+    lines(vect(grille), col = "blue", lwd = 0.5)
+    lines(aoi_vect, col = "red", lwd = 2)
+  }
+
+  mtext("MAESTRO - Reconnaissance des essences forestieres",
+        outer = TRUE, cex = 1.5, font = 2)
+}
 
 message("\n========================================================")
 message(" Rapport termine !")
