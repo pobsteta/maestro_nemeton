@@ -1,67 +1,43 @@
-#' Verifier la disponibilite de Python et des modules requis
-#'
-#' Effectue une verification AVANT de charger reticulate, via un appel
-#' systeme direct a Python. Cela evite le crash fatal de la session R
-#' cause par reticulate + PyTorch sur certaines configurations Windows.
-#'
-#' @return TRUE si Python + torch + numpy sont disponibles, FALSE sinon
+# ==============================================================================
+# Environnement conda MAESTRO
+# ==============================================================================
+
+#' Nom de l'environnement conda pour MAESTRO
 #' @export
-verifier_python <- function() {
-  # Chercher un executable Python
-  py <- Sys.which("python3")
-  if (py == "") py <- Sys.which("python")
-  if (py == "") {
-    message("  [PYTHON] Aucun executable Python trouve dans le PATH.")
-    return(FALSE)
-  }
-
-  # Tester torch + numpy via appel systeme (pas reticulate)
-  test_cmd <- sprintf(
-    '%s -c "import torch; import numpy; print(torch.__version__)"',
-    py
-  )
-  result <- tryCatch(
-    system(test_cmd, intern = TRUE, ignore.stderr = TRUE),
-    error = function(e) NULL,
-    warning = function(w) NULL
-  )
-
-  if (is.null(result) || length(result) == 0) {
-    message("  [PYTHON] torch ou numpy non disponible dans : ", py)
-    message("  Installez avec : pip install torch numpy")
-    return(FALSE)
-  }
-
-  message(sprintf("  [PYTHON] OK - PyTorch %s (%s)", result[1], py))
-  return(TRUE)
-}
+CONDA_ENV <- "maestro"
 
 #' Configurer l'environnement Python pour MAESTRO
 #'
-#' Recherche un environnement conda `maestro` ou utilise le Python systeme.
-#' Verifie que les modules requis (torch, numpy) sont disponibles.
+#' Configure reticulate pour utiliser l'environnement conda `maestro`
+#' et verifie que tous les modules requis sont disponibles.
+#' Pattern identique a `setup_python()` de flair_hub_nemeton.
 #'
+#' @param envname Nom de l'environnement conda (defaut: "maestro")
 #' @return Invisible NULL
 #' @export
-configurer_python <- function() {
-  message("=== Configuration de l'environnement Python ===")
+configurer_python <- function(envname = CONDA_ENV) {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    stop("Le package 'reticulate' est requis. Installez-le avec : ",
+         "install.packages('reticulate')")
+  }
+  library(reticulate)
 
-  envs <- tryCatch(reticulate::conda_list(), error = function(e) NULL)
-  if (!is.null(envs) && "maestro" %in% envs$name) {
-    reticulate::use_condaenv("maestro", required = FALSE)
-  } else {
-    reticulate::use_python(Sys.which("python3"), required = FALSE)
+  use_condaenv(envname, required = TRUE)
+  message("Environnement conda configure: ", envname)
+
+  # Verifier les modules disponibles
+  modules <- c("torch", "numpy", "safetensors")
+  ok <- TRUE
+  for (mod in modules) {
+    avail <- py_module_available(mod)
+    message(sprintf("  Python %s: %s", mod, ifelse(avail, "OK", "MANQUANT")))
+    if (!avail) ok <- FALSE
   }
 
-  modules_requis <- c("torch", "numpy")
-  for (mod in modules_requis) {
-    avail <- reticulate::py_module_available(mod)
-    message(sprintf("  Python %s: %s", mod, ifelse(avail, "OK", "MANQUANT")))
-    if (!avail) {
-      stop(sprintf("Module Python '%s' non trouve. Installez-le avec : ",
-                    mod),
-           "pip install ", mod)
-    }
+  if (!ok) {
+    stop("Modules Python manquants. Installez-les dans l'env '", envname, "':\n",
+         "  conda activate ", envname, "\n",
+         "  pip install torch numpy safetensors")
   }
 
   message("  Python configure.")

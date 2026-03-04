@@ -781,27 +781,30 @@ extraire_patches_raster <- function(r, grille, taille_pixels = 250) {
 # 7. INFERENCE AVEC LE MODELE MAESTRO (via reticulate/Python)
 # =============================================================================
 
-#' Configurer l'environnement Python
-configurer_python <- function() {
-  message("=== Configuration de l'environnement Python ===")
+#' Configurer l'environnement Python (pattern FLAIR-HUB)
+configurer_python <- function(envname = "maestro") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    stop("Le package 'reticulate' est requis. Installez-le avec : ",
+         "install.packages('reticulate')")
+  }
+  library(reticulate)
 
-  # Chercher un environnement conda existant
-  envs <- tryCatch(reticulate::conda_list(), error = function(e) NULL)
-  if (!is.null(envs) && "maestro" %in% envs$name) {
-    reticulate::use_condaenv("maestro", required = FALSE)
-  } else {
-    reticulate::use_python(Sys.which("python3"), required = FALSE)
+  use_condaenv(envname, required = TRUE)
+  message("Environnement conda configure: ", envname)
+
+  # Verifier les modules disponibles
+  modules <- c("torch", "numpy", "safetensors")
+  ok <- TRUE
+  for (mod in modules) {
+    avail <- py_module_available(mod)
+    message(sprintf("  Python %s: %s", mod, ifelse(avail, "OK", "MANQUANT")))
+    if (!avail) ok <- FALSE
   }
 
-  # Verifier les modules Python necessaires
-  modules_requis <- c("torch", "numpy")
-  for (mod in modules_requis) {
-    avail <- reticulate::py_module_available(mod)
-    message(sprintf("  Python %s: %s", mod, ifelse(avail, "OK", "MANQUANT")))
-    if (!avail) {
-      message(sprintf("  Installation de '%s'...", mod))
-      reticulate::py_install(mod)
-    }
+  if (!ok) {
+    stop("Modules Python manquants. Installez-les dans l'env '", envname, "':\n",
+         "  conda activate ", envname, "\n",
+         "  pip install torch numpy safetensors")
   }
 
   message("  Python configure.")
