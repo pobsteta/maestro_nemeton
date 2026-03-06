@@ -47,7 +47,7 @@ reparer_symlink_hf <- function(chemin) {
     con <- file(chemin, "rb")
     close(con)
     TRUE
-  }, error = function(e) FALSE)
+  }, warning = function(w) FALSE, error = function(e) FALSE)
 
   if (lisible) return(chemin)
 
