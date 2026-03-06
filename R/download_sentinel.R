@@ -71,15 +71,20 @@ s2_bands_config <- function() {
 #' @return Liste brute issue du JSON de reponse, ou NULL si echec
 #' @noRd
 .stac_search <- function(stac_url, collection, bbox, start_date, end_date,
-                          query_params = NULL) {
+                          query_params = NULL, is_copernicus = FALSE) {
+  # Construire le body STAC (sans extension query pour Copernicus qui ne
+
+  # la supporte pas — Copernicus utilise CQL2 ou filtrage client-side)
   body <- list(
     collections = list(collection),
     bbox = as.list(bbox),
     datetime = paste0(start_date, "T00:00:00Z/", end_date, "T23:59:59Z"),
-    limit = 500L
+    limit = 100L
   )
 
-  if (!is.null(query_params)) {
+  # Copernicus ne supporte pas l'extension "query" (→ HTTP 400)
+  # On filtre cote client apres reception
+  if (!is.null(query_params) && !is_copernicus) {
     body$query <- query_params
   }
 
@@ -130,13 +135,17 @@ search_s2_stac <- function(bbox, start_date, end_date, max_cloud = 30) {
     backend <- backends[[backend_name]]
     message(sprintf("  Essai %s...", backend$name))
 
+    is_cop <- (backend_name == "copernicus")
+
+    # Planetary Computer supporte query extension, Copernicus non
     query_params <- list()
     query_params[[backend$cloud_field]] <- list(lte = max_cloud)
 
     result <- .stac_search(
       backend$stac_url, backend$s2_collection,
       bbox, start_date, end_date,
-      query_params = query_params
+      query_params = query_params,
+      is_copernicus = is_cop
     )
 
     if (is.null(result)) next
@@ -150,9 +159,6 @@ search_s2_stac <- function(bbox, start_date, end_date, max_cloud = 30) {
     n_items <- if (is.data.frame(features)) nrow(features) else length(features)
     if (n_items == 0) next
 
-    message(sprintf("  %d scenes Sentinel-2 L2A trouvees via %s",
-                     n_items, backend$name))
-
     scenes <- data.frame(
       id = features$id,
       datetime = features$properties$datetime,
@@ -162,7 +168,21 @@ search_s2_stac <- function(bbox, start_date, end_date, max_cloud = 30) {
     )
 
     scenes$date <- as.Date(substr(scenes$datetime, 1, 10))
+
+    # Filtrage client-side de la couverture nuageuse (necessaire pour Copernicus)
+    if (!is.null(scenes$cloud_cover)) {
+      scenes <- scenes[!is.na(scenes$cloud_cover) & scenes$cloud_cover <= max_cloud, ]
+    }
+
+    if (nrow(scenes) == 0) {
+      message(sprintf("  %s : aucune scene avec nuages <= %d%%", backend$name, max_cloud))
+      next
+    }
+
     scenes <- scenes[order(scenes$cloud_cover), ]
+
+    message(sprintf("  %d scenes Sentinel-2 L2A trouvees via %s",
+                     nrow(scenes), backend$name))
 
     return(scenes)
   }
@@ -192,9 +212,12 @@ search_s1_stac <- function(bbox, start_date, end_date,
     backend <- backends[[backend_name]]
     message(sprintf("  Essai %s (%s)...", backend$name, backend$s1_collection))
 
+    is_cop <- (backend_name == "copernicus")
+
     result <- .stac_search(
       backend$stac_url, backend$s1_collection,
-      bbox, start_date, end_date
+      bbox, start_date, end_date,
+      is_copernicus = is_cop
     )
 
     if (is.null(result)) next
@@ -622,27 +645,54 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
   feature <- items$features[[1]]
   assets <- feature$assets
 
-  # Bandes a telecharger
-  # Planetary Computer utilise des noms d'assets normalises
+  # Lister les cles d'assets disponibles pour debug
+  asset_keys <- names(assets)
+  message(sprintf("  Assets disponibles: %s", paste(asset_keys, collapse = ", ")))
+
+  # Planetary Computer utilise des noms d'assets varies selon les scenes :
+  #   - "B02", "B03", ... (direct) — scenes recentes
+  #   - "B02_10m", "B05_20m", ... — certaines scenes
+  #   - "coastal", "blue", "green", "red", "rededge1", ... — noms semantiques
   band_mapping <- list(
-    B02 = "B02", B03 = "B03", B04 = "B04",
-    B05 = "B05", B06 = "B06", B07 = "B07",
-    B08 = "B08", B8A = "B8A", B11 = "B11", B12 = "B12"
+    B02 = c("B02", "b02", "B02_10m", "blue"),
+    B03 = c("B03", "b03", "B03_10m", "green"),
+    B04 = c("B04", "b04", "B04_10m", "red"),
+    B05 = c("B05", "b05", "B05_20m", "rededge1", "RE1"),
+    B06 = c("B06", "b06", "B06_20m", "rededge2", "RE2"),
+    B07 = c("B07", "b07", "B07_20m", "rededge3", "RE3"),
+    B08 = c("B08", "b08", "B08_10m", "nir", "nir08"),
+    B8A = c("B8A", "b8a", "B8A_20m", "nir09"),
+    B11 = c("B11", "b11", "B11_20m", "swir16"),
+    B12 = c("B12", "b12", "B12_20m", "swir22")
   )
 
   bbox_l93 <- sf::st_bbox(aoi)
   ext_aoi <- terra::ext(bbox_l93["xmin"], bbox_l93["xmax"],
                          bbox_l93["ymin"], bbox_l93["ymax"])
 
+  # Signer une seule fois le token SAS (reutilise pour toutes les bandes)
+  sas_token <- NULL
+  sample_href <- NULL
+  for (a in assets) {
+    if (!is.null(a$href) && grepl("blob\\.core\\.windows\\.net", a$href)) {
+      sample_href <- a$href
+      break
+    }
+  }
+  if (!is.null(sample_href)) {
+    signed <- .pc_sign_url(sample_href)
+    if (signed != sample_href) {
+      sas_token <- sub(".*\\?", "?", signed)
+    }
+  }
+
   layers <- list()
 
   for (band_name in names(band_mapping)) {
-    asset_key <- band_mapping[[band_name]]
+    keys_to_try <- band_mapping[[band_name]]
 
     href <- NULL
-    # Chercher l'asset par differentes cles possibles
-    for (key in c(asset_key, tolower(asset_key),
-                  paste0("visual_", tolower(asset_key)))) {
+    for (key in keys_to_try) {
       if (!is.null(assets[[key]])) {
         href <- assets[[key]]$href
         break
@@ -650,24 +700,55 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
     }
 
     if (is.null(href)) {
-      message(sprintf("  [WARN] Asset %s non trouve", band_name))
+      message(sprintf("  [INFO] Asset %s non trouve (cles: %s)",
+                       band_name, paste(keys_to_try, collapse = "/")))
       next
     }
 
-    # Signer l'URL pour l'acces
-    signed_href <- .pc_sign_url(href)
+    # Ajouter le token SAS si disponible
+    signed_href <- if (!is.null(sas_token) && !grepl("\\?", href)) {
+      paste0(href, sas_token)
+    } else {
+      .pc_sign_url(href)
+    }
 
-    # Lire directement le COG avec terra (lecture partielle possible)
+    # Lire le COG avec GDAL via /vsicurl/
+    # Configurer les options GDAL pour meilleure robustesse
     r <- tryCatch({
-      band_r <- terra::rast(sprintf("/vsicurl/%s", signed_href))
-      # Reprojeter en L93 et cropper sur l'AOI
+      vsicurl_path <- sprintf("/vsicurl/%s", signed_href)
+      band_r <- terra::rast(vsicurl_path)
+
+      # Cropper d'abord dans le CRS natif (UTM) pour reduire les donnees
+      aoi_utm <- sf::st_transform(aoi, terra::crs(band_r))
+      ext_utm <- terra::ext(as.numeric(sf::st_bbox(aoi_utm)))
+      band_r <- terra::crop(band_r, ext_utm)
+
+      # Puis reprojeter en Lambert-93
       band_r <- terra::project(band_r, "EPSG:2154")
       band_r <- terra::crop(band_r, ext_aoi)
+
       names(band_r) <- band_name
       band_r
     }, error = function(e) {
       message(sprintf("  [WARN] Echec lecture COG %s: %s", band_name, e$message))
       NULL
+    }, warning = function(w) {
+      message(sprintf("  [WARN] Avertissement COG %s: %s", band_name, w$message))
+      # Continuer malgre les warnings GDAL
+      tryCatch({
+        vsicurl_path <- sprintf("/vsicurl/%s", signed_href)
+        band_r <- suppressWarnings(terra::rast(vsicurl_path))
+        aoi_utm <- sf::st_transform(aoi, terra::crs(band_r))
+        ext_utm <- terra::ext(as.numeric(sf::st_bbox(aoi_utm)))
+        band_r <- suppressWarnings(terra::crop(band_r, ext_utm))
+        band_r <- suppressWarnings(terra::project(band_r, "EPSG:2154"))
+        band_r <- suppressWarnings(terra::crop(band_r, ext_aoi))
+        names(band_r) <- band_name
+        band_r
+      }, error = function(e2) {
+        message(sprintf("  [WARN] Echec definitif COG %s: %s", band_name, e2$message))
+        NULL
+      })
     })
 
     if (!is.null(r)) layers[[band_name]] <- r
@@ -855,13 +936,20 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
   layers <- list()
 
   for (pol in c("vv", "vh")) {
-    if (is.null(assets[[pol]])) next
+    if (is.null(assets[[pol]])) {
+      message(sprintf("  [INFO] Asset S1 '%s' non trouve", pol))
+      next
+    }
 
     href <- assets[[pol]]$href
     signed_href <- .pc_sign_url(href)
 
     r <- tryCatch({
       band_r <- terra::rast(sprintf("/vsicurl/%s", signed_href))
+      # Cropper dans le CRS natif d'abord pour reduire le volume
+      aoi_native <- sf::st_transform(aoi, terra::crs(band_r))
+      ext_native <- terra::ext(as.numeric(sf::st_bbox(aoi_native)))
+      band_r <- terra::crop(band_r, ext_native)
       band_r <- terra::project(band_r, "EPSG:2154")
       band_r <- terra::crop(band_r, ext_aoi)
       names(band_r) <- toupper(pol)
