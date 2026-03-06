@@ -44,6 +44,19 @@ ESSENCES = [
     "Peuplier",            # 12 - Populus spp.
 ]
 
+# Classes regroupees TreeSatAI (8 classes) - schema simplifie
+# Utilise pour le fine-tuning tant que le LiDAR n'est pas integre
+ESSENCES_TREESATAI = [
+    "Chene",              # 0 - Quercus spp.
+    "Hetre",              # 1 - Fagus sylvatica
+    "Pin",                # 2 - Pinus spp.
+    "Epicea",             # 3 - Picea abies
+    "Douglas/Sapin",      # 4 - Pseudotsuga + Abies (sempervirents sombres)
+    "Meleze",             # 5 - Larix spp. (caduc)
+    "Feuillus divers",    # 6 - Betula, Populus, Alnus, Fraxinus, Acer, etc.
+    "Coupe/Vide",         # 7 - absence de couvert arbore
+]
+
 # Configuration des modalites MAESTRO
 MODALITIES = {
     "aerial": {"in_channels": 4, "patch_size": (16, 16)},
@@ -628,9 +641,13 @@ def predire_patch(modele, image_np, device="cpu"):
         probs = torch.softmax(logits, dim=1)
         classe = torch.argmax(probs, dim=1).item()
 
+    # Choisir les noms de classes selon le nombre de sorties du modele
+    n_out = probs.shape[1]
+    names = ESSENCES_TREESATAI if n_out == len(ESSENCES_TREESATAI) else ESSENCES
+
     return {
         "classe": classe,
-        "essence": ESSENCES[classe] if classe < len(ESSENCES) else "Classe_%d" % classe,
+        "essence": names[classe] if classe < len(names) else "Classe_%d" % classe,
         "probabilites": probs.cpu().numpy().flatten().tolist(),
     }
 
@@ -656,8 +673,12 @@ def predire_multimodal(modele, donnees, device="cpu"):
         probs = torch.softmax(logits, dim=1)
         classes = torch.argmax(probs, dim=1).cpu().numpy().tolist()
 
+    # Choisir les noms de classes selon le nombre de sorties du modele
+    n_out = probs.shape[1]
+    names = ESSENCES_TREESATAI if n_out == len(ESSENCES_TREESATAI) else ESSENCES
+
     essences = [
-        ESSENCES[c] if c < len(ESSENCES) else "Classe_%d" % c
+        names[c] if c < len(names) else "Classe_%d" % c
         for c in classes
     ]
 

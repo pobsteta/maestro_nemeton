@@ -139,7 +139,8 @@ download_treesatai_hf <- function(output_dir = "data/TreeSatAI-TS") {
 #'
 #' Charge les encodeurs pre-entraines MAESTRO et entraine la tete de
 #' classification sur les donnees TreeSatAI. Les 20 especes TreeSatAI sont
-#' mappees vers les 13 classes PureForest utilisees par MAESTRO.
+#' regroupees en 8 classes (schema simplifie). Les 13 classes PureForest
+#' seront utilisees quand le LiDAR sera integre.
 #'
 #' @param checkpoint_path Chemin vers le checkpoint pre-entraine MAESTRO (.ckpt).
 #'   Peut etre obtenu via [telecharger_modele()].
@@ -219,7 +220,7 @@ finetune_maestro <- function(checkpoint_path, data_dir,
     batch_size = as.integer(batch_size),
     freeze_encoder = freeze_encoder,
     modalities = as.list(modalities),
-    n_classes = 13L,
+    n_classes = 8L,
     device = device_str,
     patience = as.integer(patience)
   )

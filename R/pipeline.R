@@ -62,6 +62,7 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               millesime_irc = NULL,
                               patch_size = 250L,
                               resolution = 0.2,
+                              n_classes = 8L,
                               use_s2 = FALSE,
                               use_s1 = FALSE,
                               date_sentinel = NULL,
@@ -192,13 +193,15 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
   # 12. Inference multi-modale
   predictions <- executer_inference_multimodal(
     patches_multimodal, fichiers_modele,
-    n_classes = 13L,
+    n_classes = n_classes,
     modalites = modalites_noms,
     utiliser_gpu = gpu
   )
 
   # 13. Assembler et exporter
+  essences <- if (n_classes == 8L) essences_treesatai() else essences_pureforest()
   resultats <- assembler_resultats(grille, predictions,
+                                    essences = essences,
                                     dossier_sortie = output_dir)
 
   # 14. Carte raster

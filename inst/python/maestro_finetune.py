@@ -42,45 +42,93 @@ from maestro_inference import (
 
 
 # ============================================================================
-# Mapping TreeSatAI -> PureForest (13 classes)
+# Classes TreeSatAI regroupees (8 classes)
 # ============================================================================
+#
+# Schema simplifie pour le fine-tuning sur TreeSatAI :
+#   0 = Chene         (Quercus spp.)
+#   1 = Hetre         (Fagus sylvatica)
+#   2 = Pin           (Pinus spp.)
+#   3 = Epicea        (Picea abies)
+#   4 = Douglas       (Pseudotsuga menziesii) -- sempervirent
+#   5 = Meleze        (Larix spp.)            -- caduc, phenologie differente
+#   6 = Feuillus div. (Betula, Populus, Alnus, Fraxinus, Acer, Castanea, ...)
+#   7 = Coupe/Vide    (absence de couvert)
+#
+# On passera aux 13 classes PureForest quand le LiDAR sera integre.
 
-# TreeSatAI a 20 especes (15 genres). On mappe vers PureForest 13 classes.
-# Les especes non-mappables sont ignorees (label = -1).
-TREESATAI_TO_PUREFOREST = {
-    # Genus -> PureForest code
-    "Quercus": 0,            # Chene decidue
+ESSENCES_TREESATAI = [
+    "Chene",              # 0
+    "Hetre",              # 1
+    "Pin",                # 2
+    "Epicea",             # 3
+    "Douglas/Sapin",      # 4 - Pseudotsuga + Abies (resineux sempervirents sombres)
+    "Meleze",             # 5 - caduc, phenologie distincte
+    "Feuillus divers",    # 6
+    "Coupe/Vide",         # 7
+]
+
+N_CLASSES_TREESATAI = len(ESSENCES_TREESATAI)  # 8
+
+# Mapping TreeSatAI 20 especes -> 8 classes regroupees
+TREESATAI_TO_NEMETON = {
+    # Chene (0)
+    "Quercus": 0,
     "Quercus robur": 0,
     "Quercus petraea": 0,
     "Quercus rubra": 0,
-    "Fagus": 2,              # Hetre
-    "Fagus sylvatica": 2,
-    "Castanea": 3,           # Chataignier -- rare dans TreeSatAI (Basse-Saxe)
-    "Pinus": 5,              # Pin sylvestre (dominant en Basse-Saxe)
-    "Pinus sylvestris": 5,
-    "Picea": 8,              # Epicea
-    "Picea abies": 8,
-    "Abies": 9,              # Sapin
-    "Pseudotsuga": 10,       # Douglas
-    "Pseudotsuga menziesii": 10,
-    "Larix": 11,             # Meleze
-    "Larix decidua": 11,
-    "Larix kaempferi": 11,
-    "Populus": 12,            # Peuplier
-    # Non mappables -> -1 (ignores)
-    "Betula": -1,            # Bouleau
-    "Betula pendula": -1,
-    "Betula pubescens": -1,
-    "Alnus": -1,             # Aulne
-    "Alnus glutinosa": -1,
-    "Fraxinus": -1,          # Frene
-    "Fraxinus excelsior": -1,
-    "Acer": -1,              # Erable
-    "Acer pseudoplatanus": -1,
-    "Tilia": -1,             # Tilleul
-    "Carpinus": -1,          # Charme
-    "Robinia": -1,           # Robinier
-    "Salix": -1,             # Saule
+    # Hetre (1)
+    "Fagus": 1,
+    "Fagus sylvatica": 1,
+    # Pin (2)
+    "Pinus": 2,
+    "Pinus sylvestris": 2,
+    # Epicea (3)
+    "Picea": 3,
+    "Picea abies": 3,
+    # Douglas/Sapin (4) -- resineux sempervirents sombres
+    "Pseudotsuga": 4,
+    "Pseudotsuga menziesii": 4,
+    "Abies": 4,
+    # Meleze (5) -- caduc
+    "Larix": 5,
+    "Larix decidua": 5,
+    "Larix kaempferi": 5,
+    # Feuillus divers (6) -- tous les feuillus non Chene/Hetre
+    "Castanea": 6,
+    "Populus": 6,
+    "Betula": 6,
+    "Betula pendula": 6,
+    "Betula pubescens": 6,
+    "Alnus": 6,
+    "Alnus glutinosa": 6,
+    "Fraxinus": 6,
+    "Fraxinus excelsior": 6,
+    "Acer": 6,
+    "Acer pseudoplatanus": 6,
+    "Tilia": 6,
+    "Carpinus": 6,
+    "Robinia": 6,
+    "Salix": 6,
+    "Prunus": 6,
+    "Sorbus": 6,
+    "Taxus": 6,
+}
+
+# Ancien mapping PureForest 13 classes (conserve pour migration future)
+TREESATAI_TO_PUREFOREST = {
+    "Quercus": 0, "Quercus robur": 0, "Quercus petraea": 0, "Quercus rubra": 0,
+    "Fagus": 2, "Fagus sylvatica": 2, "Castanea": 3,
+    "Pinus": 5, "Pinus sylvestris": 5,
+    "Picea": 8, "Picea abies": 8, "Abies": 9,
+    "Pseudotsuga": 10, "Pseudotsuga menziesii": 10,
+    "Larix": 11, "Larix decidua": 11, "Larix kaempferi": 11,
+    "Populus": 12,
+    "Betula": -1, "Betula pendula": -1, "Betula pubescens": -1,
+    "Alnus": -1, "Alnus glutinosa": -1,
+    "Fraxinus": -1, "Fraxinus excelsior": -1,
+    "Acer": -1, "Acer pseudoplatanus": -1,
+    "Tilia": -1, "Carpinus": -1, "Robinia": -1, "Salix": -1,
 }
 
 # Noms des 20 classes TreeSatAI (ordre standard Zenodo)
@@ -91,7 +139,13 @@ TREESATAI_CLASSES = [
     "Robinia", "Salix", "Sorbus", "Taxus", "Tilia",
 ]
 
-# Mapping index TreeSatAI -> index PureForest
+# Mapping index TreeSatAI -> index classes regroupees (8 classes)
+TREESATAI_IDX_TO_NEMETON = {}
+for i, name in enumerate(TREESATAI_CLASSES):
+    nm = TREESATAI_TO_NEMETON.get(name, -1)
+    TREESATAI_IDX_TO_NEMETON[i] = nm
+
+# Mapping index TreeSatAI -> index PureForest (13 classes, pour migration future)
 TREESATAI_IDX_TO_PUREFOREST = {}
 for i, name in enumerate(TREESATAI_CLASSES):
     pf = TREESATAI_TO_PUREFOREST.get(name, -1)
@@ -124,7 +178,7 @@ class TreeSatAIDataset(Dataset):
 
     def __init__(self, data_dir, split="train", modalities=None,
                  patch_size=304, target_patch_size=250,
-                 pureforest_mapping=True):
+                 class_mapping="nemeton"):
         """
         Args:
             data_dir: Chemin vers le dossier TreeSatAI
@@ -132,16 +186,17 @@ class TreeSatAIDataset(Dataset):
             modalities: Liste des modalites ["aerial", "s1", "s2"]
             patch_size: Taille des patches TreeSatAI (304 pour 60m@0.2m)
             target_patch_size: Taille cible pour MAESTRO (250)
-            pureforest_mapping: Mapper vers les 13 classes PureForest
+            class_mapping: "nemeton" (8 classes), "pureforest" (13 classes),
+                           ou None (20 classes TreeSatAI originales)
         """
         self.data_dir = Path(data_dir)
         self.split = split
         self.modalities = modalities or ["aerial"]
         self.patch_size = patch_size
         self.target_patch_size = target_patch_size
-        self.pureforest_mapping = pureforest_mapping
+        self.class_mapping = class_mapping
 
-        self.samples = []  # (file_path, treesatai_label, pureforest_label)
+        self.samples = []  # (file_path, treesatai_label, mapped_label)
         self._scan_files()
 
     def _scan_files(self):
@@ -154,6 +209,14 @@ class TreeSatAIDataset(Dataset):
         if not aerial_dir.exists():
             raise FileNotFoundError(
                 "Dossier aerial introuvable: %s" % aerial_dir)
+
+        # Choisir le mapping selon la config
+        if self.class_mapping == "nemeton":
+            idx_map = TREESATAI_IDX_TO_NEMETON
+        elif self.class_mapping == "pureforest":
+            idx_map = TREESATAI_IDX_TO_PUREFOREST
+        else:
+            idx_map = None  # Pas de mapping, classes originales
 
         for class_dir in sorted(aerial_dir.iterdir()):
             if not class_dir.is_dir():
@@ -175,21 +238,24 @@ class TreeSatAIDataset(Dataset):
                 print("  [WARN] Classe '%s' non reconnue, ignoree" % class_name)
                 continue
 
-            # Label PureForest
-            pf_label = TREESATAI_IDX_TO_PUREFOREST.get(tsa_idx, -1)
-            if self.pureforest_mapping and pf_label < 0:
-                continue  # Ignorer les especes non-PureForest
-
-            label = pf_label if self.pureforest_mapping else tsa_idx
+            # Mapper le label
+            if idx_map is not None:
+                mapped_label = idx_map.get(tsa_idx, -1)
+                if mapped_label < 0:
+                    continue  # Ignorer les especes non-mappables
+                label = mapped_label
+            else:
+                label = tsa_idx
 
             # Scanner les fichiers .tif
             tif_files = sorted(class_dir.glob("*.tif"))
             for f in tif_files:
                 self.samples.append((f, tsa_idx, label))
 
-        print("  TreeSatAI %s: %d samples (%d classes PureForest)" % (
+        mapping_name = self.class_mapping or "originales"
+        print("  TreeSatAI %s: %d samples (%d classes %s)" % (
             self.split, len(self.samples),
-            len(set(s[2] for s in self.samples))))
+            len(set(s[2] for s in self.samples)), mapping_name))
 
     def __len__(self):
         return len(self.samples)
@@ -329,7 +395,7 @@ class TreeSatAIDataset(Dataset):
 def finetuner(checkpoint_path, data_dir, output_path,
               epochs=30, lr=1e-3, lr_encoder=1e-5,
               batch_size=16, freeze_encoder=True,
-              modalities=None, n_classes=13,
+              modalities=None, n_classes=8,
               device="cpu", patience=5,
               augment=True, weight_decay=1e-4):
     """
@@ -345,7 +411,7 @@ def finetuner(checkpoint_path, data_dir, output_path,
         batch_size: Taille du batch
         freeze_encoder: Geler les encodeurs (True = entrainer seulement la tete)
         modalities: Liste des modalites a utiliser
-        n_classes: Nombre de classes PureForest (13)
+        n_classes: Nombre de classes (8 = TreeSatAI regroupe, 13 = PureForest)
         device: 'cpu' ou 'cuda'
         patience: Early stopping patience
         augment: Augmentation des donnees (flips, rotations)
@@ -448,13 +514,21 @@ def finetuner(checkpoint_path, data_dir, output_path,
             dataset_mods.append(m)
     dataset_mods = list(set(dataset_mods))
 
+    # Choisir le mapping selon le nombre de classes
+    if n_classes == N_CLASSES_TREESATAI:
+        class_mapping = "nemeton"
+    elif n_classes == 13:
+        class_mapping = "pureforest"
+    else:
+        class_mapping = None  # Classes originales TreeSatAI
+
     train_dataset = TreeSatAIDataset(
         data_dir, split="train", modalities=dataset_mods,
-        pureforest_mapping=(n_classes == 13)
+        class_mapping=class_mapping
     )
     test_dataset = TreeSatAIDataset(
         data_dir, split="test", modalities=dataset_mods,
-        pureforest_mapping=(n_classes == 13)
+        class_mapping=class_mapping
     )
 
     if len(train_dataset) == 0:
@@ -500,9 +574,15 @@ def finetuner(checkpoint_path, data_dir, output_path,
     # Normaliser
     class_weights = class_weights / class_weights.sum() * n_classes
 
+    # Noms des classes pour l'affichage
+    if n_classes == N_CLASSES_TREESATAI:
+        class_names = ESSENCES_TREESATAI
+    else:
+        class_names = ESSENCES
+
     print("  Classes presentes: %s" % dict(sorted(label_counts.items())))
     print("  Poids de classe: %s" % {
-        ESSENCES[k] if k < len(ESSENCES) else k:
+        class_names[k] if k < len(class_names) else k:
         "%.2f" % class_weights[k].item()
         for k in sorted(label_counts.keys()) if 0 <= k < n_classes
     })
@@ -611,8 +691,9 @@ def finetuner(checkpoint_path, data_dir, output_path,
                 "epoch": epoch + 1,
                 "val_acc": val_acc,
                 "n_classes": n_classes,
+                "class_mapping": class_mapping,
+                "class_names": list(class_names[:n_classes]),
                 "modalities": list(mod_config.keys()),
-                "pureforest_mapping": True,
                 "history": history,
             }, str(output_path))
             print("    -> Meilleur modele sauvegarde (val_acc=%.1f%%)" % val_acc)
@@ -658,8 +739,8 @@ def finetuner(checkpoint_path, data_dir, output_path,
 
     print("\n  Precision par classe:")
     for cls in sorted(total_per_class.keys()):
-        if 0 <= cls < len(ESSENCES):
-            name = ESSENCES[cls]
+        if 0 <= cls < len(class_names):
+            name = class_names[cls]
         else:
             name = "Classe_%d" % cls
         acc = correct_per_class[cls] / total_per_class[cls] * 100
