@@ -55,7 +55,8 @@ download_treesatai <- function(output_dir = "data/TreeSatAI",
   if (source %in% c("auto", "huggingface")) {
     hf_ok <- tryCatch({
       .treesatai_download_hf(output_dir, modalities)
-      TRUE
+      # Verifier que les donnees sont bien la
+      .treesatai_check_structure(output_dir, modalities[1])
     }, error = function(e) {
       message(sprintf("  HuggingFace echoue: %s", e$message))
       FALSE
@@ -94,6 +95,10 @@ download_treesatai <- function(output_dir = "data/TreeSatAI",
 
 
 #' Telecharger TreeSatAI depuis Hugging Face
+#'
+#' Le dataset HF contient des fichiers zip (aerial.zip, sentinel.zip, etc.)
+#' et un fichier split.zip avec les listes train/test.
+#' Sur Windows, les symlinks echouent souvent -> on resout les blobs.
 #' @keywords internal
 .treesatai_download_hf <- function(output_dir, modalities) {
   if (!requireNamespace("hfhub", quietly = TRUE)) {
@@ -109,99 +114,339 @@ download_treesatai <- function(output_dir = "data/TreeSatAI",
   )
   message(sprintf("  Snapshot HF: %s", snapshot_path))
 
-  # Scanner le snapshot pour trouver les .tif aeriens
-  # Structure HF possible: data/aerial/60m/<species>/*.tif
-  # ou: aerial/<split>/<species>/*.tif
-  # ou: <species>/*.tif dans un sous-dossier aerial
-  .treesatai_organize_from_snapshot(snapshot_path, output_dir, modalities)
-}
+  # Le repo HF contient: aerial.zip, sentinel.zip, sentinel-ts.zip,
+  # geojson.zip, labels.zip, split.zip
+  # Sur Windows les symlinks echouent -> resoudre les blobs reels
 
-
-#' Organiser les fichiers telecharges en structure train/test/classe
-#' @keywords internal
-.treesatai_organize_from_snapshot <- function(snapshot_path, output_dir,
-                                               modalities) {
-  # Les 20 genres TreeSatAI
-  species <- c("Abies", "Acer", "Alnus", "Betula", "Carpinus",
-               "Castanea", "Fagus", "Fraxinus", "Larix", "Picea",
-               "Pinus", "Populus", "Prunus", "Pseudotsuga", "Quercus",
-               "Robinia", "Salix", "Sorbus", "Taxus", "Tilia")
+  # Mapping modalite -> nom du zip dans le repo HF
+  mod_zip_map <- list(
+    aerial = "aerial.zip",
+    s1 = "sentinel.zip",
+    s2 = "sentinel.zip"
+  )
 
   for (mod in modalities) {
-    # Chercher les dossiers aerial dans le snapshot
-    # Patterns possibles dans le snapshot HF
-    search_dirs <- c(
-      file.path(snapshot_path, mod),
-      file.path(snapshot_path, "data", mod),
-      file.path(snapshot_path, mod, "60m"),
-      file.path(snapshot_path, "data", mod, "60m")
-    )
-
-    src_dir <- NULL
-    for (d in search_dirs) {
-      if (dir.exists(d)) {
-        src_dir <- d
-        break
-      }
-    }
-
-    if (is.null(src_dir)) {
-      message(sprintf("  [WARN] Dossier %s introuvable dans le snapshot HF", mod))
+    zip_name <- mod_zip_map[[mod]]
+    if (is.null(zip_name)) {
+      message(sprintf("  [WARN] Modalite '%s' non supportee pour HF", mod))
       next
     }
 
-    # Determiner si train/test existe deja dans le source
-    has_train <- dir.exists(file.path(src_dir, "train"))
-    has_test <- dir.exists(file.path(src_dir, "test"))
-
-    if (has_train || has_test) {
-      # Structure avec train/test : copier tel quel
-      for (split in c("train", "test")) {
-        split_src <- file.path(src_dir, split)
-        if (!dir.exists(split_src)) next
-        split_dst <- file.path(output_dir, mod, split)
-        if (!dir.exists(split_dst)) {
-          dir.create(split_dst, recursive = TRUE)
-        }
-        .treesatai_copy_species(split_src, split_dst, species)
-      }
-    } else {
-      # Structure plate par espece : split 90/10 (comme l'original)
-      message(sprintf("  Organisation %s en train/test (90/10)...", mod))
-      all_tifs <- list.files(src_dir, pattern = "\\.tif$",
-                              recursive = TRUE, full.names = TRUE)
-      if (length(all_tifs) == 0) {
-        message(sprintf("  [WARN] Aucun .tif trouve dans %s", src_dir))
-        next
-      }
-
-      # Organiser par espece
-      for (sp in species) {
-        sp_tifs <- all_tifs[grepl(paste0("/", sp, "/"), all_tifs,
-                                   ignore.case = TRUE)]
-        if (length(sp_tifs) == 0) next
-
-        # Split 90/10
-        set.seed(42)
-        n <- length(sp_tifs)
-        train_idx <- sort(sample.int(n, size = round(n * 0.9)))
-        test_idx <- setdiff(seq_len(n), train_idx)
-
-        for (split in c("train", "test")) {
-          idx <- if (split == "train") train_idx else test_idx
-          if (length(idx) == 0) next
-          dst <- file.path(output_dir, mod, split, sp)
-          if (!dir.exists(dst)) dir.create(dst, recursive = TRUE)
-          file.copy(sp_tifs[idx], dst, overwrite = FALSE)
-        }
-      }
+    # Trouver le fichier zip (snapshot ou blob)
+    zip_path <- .treesatai_resolve_hf_file(snapshot_path, zip_name)
+    if (is.null(zip_path)) {
+      stop(sprintf("Fichier %s introuvable dans le snapshot HF", zip_name))
     }
+    message(sprintf("  Zip %s: %s (%.0f Mo)",
+                    zip_name, basename(zip_path),
+                    file.size(zip_path) / 1e6))
+
+    # Extraire le zip dans un dossier temporaire
+    tmp_extract <- file.path(output_dir, ".tmp_extract")
+    if (dir.exists(tmp_extract)) unlink(tmp_extract, recursive = TRUE)
+    dir.create(tmp_extract, recursive = TRUE)
+    message(sprintf("  Extraction de %s...", zip_name))
+    utils::unzip(zip_path, exdir = tmp_extract)
+
+    # Trouver le dossier racine des tifs
+    src_dir <- .treesatai_find_tif_root(tmp_extract, mod)
+    if (is.null(src_dir)) {
+      unlink(tmp_extract, recursive = TRUE)
+      stop(sprintf("Aucun .tif trouve apres extraction de %s", zip_name))
+    }
+
+    # Telecharger split.zip pour connaitre les listes train/test
+    split_info <- .treesatai_get_split_info(snapshot_path, output_dir)
+
+    # Organiser en train/test/espece
+    .treesatai_organize_extracted(src_dir, output_dir, mod, split_info)
+
+    # Nettoyage
+    unlink(tmp_extract, recursive = TRUE)
 
     n_train <- length(list.files(file.path(output_dir, mod, "train"),
                                   pattern = "\\.tif$", recursive = TRUE))
     n_test <- length(list.files(file.path(output_dir, mod, "test"),
                                  pattern = "\\.tif$", recursive = TRUE))
     message(sprintf("  %s: %d train + %d test", mod, n_train, n_test))
+  }
+}
+
+
+#' Resoudre un fichier HF (gere les symlinks casses sur Windows)
+#'
+#' Sur Windows sans privileges admin, hfhub cree des symlinks qui echouent.
+#' On lit le pointer file pour trouver le blob reel dans le cache HF.
+#' @keywords internal
+.treesatai_resolve_hf_file <- function(snapshot_path, filename) {
+  fpath <- file.path(snapshot_path, filename)
+
+  # Cas 1: Le fichier existe et est lisible (symlink OK ou Linux/Mac)
+  if (file.exists(fpath) && file.size(fpath) > 1000) {
+    return(fpath)
+  }
+
+  # Cas 2: Windows - le fichier est un pointer/symlink casse
+  # Chercher le blob dans le cache HF
+  # Le cache est structure: .cache/huggingface/hub/datasets--<org>--<name>/blobs/
+  cache_root <- dirname(dirname(snapshot_path))  # remonte de snapshots/<hash>
+  blobs_dir <- file.path(cache_root, "blobs")
+
+  if (!dir.exists(blobs_dir)) {
+    message(sprintf("  [WARN] Dossier blobs introuvable: %s", blobs_dir))
+    return(NULL)
+  }
+
+  # Methode 1: Lire le pointer file (format git-lfs)
+  if (file.exists(fpath) && file.size(fpath) < 1000) {
+    pointer_content <- tryCatch(readLines(fpath, warn = FALSE),
+                                 error = function(e) NULL)
+    if (!is.null(pointer_content)) {
+      sha_line <- grep("^oid sha256:", pointer_content, value = TRUE)
+      if (length(sha_line) > 0) {
+        sha <- sub("^oid sha256:", "", sha_line[1])
+        blob_path <- file.path(blobs_dir, sha)
+        if (file.exists(blob_path) && file.size(blob_path) > 1000) {
+          message(sprintf("  [Windows] Blob resolu pour %s", filename))
+          return(blob_path)
+        }
+      }
+    }
+  }
+
+  # Methode 2: Chercher le plus gros blob (heuristique pour aerial.zip)
+  blobs <- list.files(blobs_dir, full.names = TRUE)
+  if (length(blobs) == 0) return(NULL)
+
+  # Pour aerial.zip on cherche un blob > 100 Mo
+  blob_sizes <- file.size(blobs)
+  # Trier par taille decroissante
+  big_blobs <- blobs[order(blob_sizes, decreasing = TRUE)]
+  big_sizes <- sort(blob_sizes, decreasing = TRUE)
+
+  # Essayer de verifier que c'est un zip valide
+  for (i in seq_along(big_blobs)) {
+    if (big_sizes[i] < 1e6) break  # Moins de 1 Mo, pas un zip de donnees
+    # Verifier le magic number ZIP (PK\x03\x04)
+    magic <- tryCatch({
+      con <- file(big_blobs[i], "rb")
+      bytes <- readBin(con, "raw", 4)
+      close(con)
+      bytes
+    }, error = function(e) NULL)
+    if (!is.null(magic) && length(magic) >= 4 &&
+        magic[1] == as.raw(0x50) && magic[2] == as.raw(0x4b)) {
+      # C'est un ZIP, verifier si c'est le bon en regardant le contenu
+      zip_contents <- tryCatch(utils::unzip(big_blobs[i], list = TRUE),
+                                error = function(e) NULL)
+      if (!is.null(zip_contents)) {
+        # Pour aerial.zip, on cherche des .tif
+        if (grepl("aerial", filename, ignore.case = TRUE)) {
+          if (any(grepl("\\.tif$", zip_contents$Name, ignore.case = TRUE))) {
+            message(sprintf("  [Windows] Blob identifie pour %s: %s (%.0f Mo)",
+                            filename, basename(big_blobs[i]),
+                            big_sizes[i] / 1e6))
+            return(big_blobs[i])
+          }
+        } else {
+          # Pour d'autres zips, retourner le premier zip valide du bon type
+          return(big_blobs[i])
+        }
+      }
+    }
+  }
+
+  message(sprintf("  [WARN] Impossible de resoudre %s dans les blobs HF", filename))
+  NULL
+}
+
+
+#' Trouver le dossier racine contenant les .tif apres extraction
+#' @keywords internal
+.treesatai_find_tif_root <- function(extract_dir, modality) {
+  # Chercher tous les .tif
+  tifs <- list.files(extract_dir, pattern = "\\.tif$",
+                      recursive = TRUE, full.names = TRUE)
+  if (length(tifs) == 0) return(NULL)
+
+  # Remonter au dossier parent le plus haut qui contient des sous-dossiers especes
+  # Structure typique: extract/aerial/Abies/*.tif ou extract/Abies/*.tif
+  first_tif_dir <- dirname(tifs[1])
+  parent <- dirname(first_tif_dir)
+
+  # Verifier les structures possibles
+  # 1. extract_dir/aerial/<species>/*.tif
+  mod_dir <- file.path(extract_dir, modality)
+  if (dir.exists(mod_dir) &&
+      length(list.files(mod_dir, pattern = "\\.tif$", recursive = TRUE)) > 0) {
+    return(mod_dir)
+  }
+
+  # 2. extract_dir/<species>/*.tif (directement les especes)
+  subdirs <- list.dirs(extract_dir, recursive = FALSE)
+  for (d in subdirs) {
+    if (length(list.files(d, pattern = "\\.tif$")) > 0) {
+      return(extract_dir)
+    }
+  }
+
+  # 3. Remonter depuis le premier tif
+  return(parent)
+}
+
+
+#' Obtenir les informations de split train/test depuis split.zip
+#' @keywords internal
+.treesatai_get_split_info <- function(snapshot_path, output_dir) {
+  split_path <- .treesatai_resolve_hf_file(snapshot_path, "split.zip")
+  if (is.null(split_path)) {
+    message("  [INFO] split.zip non trouve, utilisation du split 90/10")
+    return(NULL)
+  }
+
+  tmp_split <- file.path(output_dir, ".tmp_split")
+  if (dir.exists(tmp_split)) unlink(tmp_split, recursive = TRUE)
+  dir.create(tmp_split, recursive = TRUE)
+
+  tryCatch({
+    utils::unzip(split_path, exdir = tmp_split)
+
+    # Chercher les fichiers csv/txt de split
+    split_files <- list.files(tmp_split, pattern = "\\.(csv|txt)$",
+                               recursive = TRUE, full.names = TRUE)
+    if (length(split_files) == 0) {
+      unlink(tmp_split, recursive = TRUE)
+      return(NULL)
+    }
+
+    # Lire les fichiers de split
+    # Format attendu: un fichier train.csv et test.csv, ou un fichier
+    # avec une colonne "split"
+    train_files <- split_files[grepl("train", basename(split_files),
+                                      ignore.case = TRUE)]
+    test_files <- split_files[grepl("test", basename(split_files),
+                                     ignore.case = TRUE)]
+
+    result <- list()
+    if (length(train_files) > 0) {
+      train_data <- tryCatch(
+        utils::read.csv(train_files[1], header = FALSE, stringsAsFactors = FALSE),
+        error = function(e) {
+          # Essayer sans header avec sep differents
+          tryCatch(
+            utils::read.table(train_files[1], header = FALSE,
+                               stringsAsFactors = FALSE),
+            error = function(e2) NULL
+          )
+        }
+      )
+      if (!is.null(train_data)) {
+        result$train <- trimws(train_data[[1]])
+      }
+    }
+    if (length(test_files) > 0) {
+      test_data <- tryCatch(
+        utils::read.csv(test_files[1], header = FALSE, stringsAsFactors = FALSE),
+        error = function(e) {
+          tryCatch(
+            utils::read.table(test_files[1], header = FALSE,
+                               stringsAsFactors = FALSE),
+            error = function(e2) NULL
+          )
+        }
+      )
+      if (!is.null(test_data)) {
+        result$test <- trimws(test_data[[1]])
+      }
+    }
+
+    unlink(tmp_split, recursive = TRUE)
+
+    if (length(result) > 0) {
+      message(sprintf("  Split info: %d train, %d test",
+                      length(if (!is.null(result$train)) result$train else character(0)),
+                      length(if (!is.null(result$test)) result$test else character(0))))
+      return(result)
+    }
+    NULL
+  }, error = function(e) {
+    message(sprintf("  [WARN] Erreur lecture split.zip: %s", e$message))
+    unlink(tmp_split, recursive = TRUE)
+    NULL
+  })
+}
+
+
+#' Organiser les fichiers extraits en structure train/test/espece
+#' @keywords internal
+.treesatai_organize_extracted <- function(src_dir, output_dir, mod, split_info) {
+  species <- c("Abies", "Acer", "Alnus", "Betula", "Carpinus",
+               "Castanea", "Fagus", "Fraxinus", "Larix", "Picea",
+               "Pinus", "Populus", "Prunus", "Pseudotsuga", "Quercus",
+               "Robinia", "Salix", "Sorbus", "Taxus", "Tilia")
+
+  # Verifier si la structure contient deja train/test
+  has_train <- dir.exists(file.path(src_dir, "train"))
+  has_test <- dir.exists(file.path(src_dir, "test"))
+
+  if (has_train || has_test) {
+    message(sprintf("  Structure train/test detectee pour %s", mod))
+    for (split in c("train", "test")) {
+      split_src <- file.path(src_dir, split)
+      if (!dir.exists(split_src)) next
+      split_dst <- file.path(output_dir, mod, split)
+      if (!dir.exists(split_dst)) dir.create(split_dst, recursive = TRUE)
+      .treesatai_copy_species(split_src, split_dst, species)
+    }
+    return(invisible(NULL))
+  }
+
+  # Structure plate par espece -> utiliser split_info ou split 90/10
+  all_tifs <- list.files(src_dir, pattern = "\\.tif$",
+                          recursive = TRUE, full.names = TRUE)
+  if (length(all_tifs) == 0) {
+    stop(sprintf("Aucun .tif dans %s", src_dir))
+  }
+
+  message(sprintf("  Organisation %s: %d fichiers en train/test...",
+                  mod, length(all_tifs)))
+
+  for (sp in species) {
+    # Matcher par dossier parent ou par prefixe du fichier
+    sp_pattern <- paste0("(^|/|\\\\)", sp, "(/|\\\\|_)")
+    sp_tifs <- all_tifs[grepl(sp_pattern, all_tifs, ignore.case = TRUE)]
+    if (length(sp_tifs) == 0) next
+
+    if (!is.null(split_info)) {
+      # Utiliser les listes de split officielles
+      tif_basenames <- tools::file_path_sans_ext(basename(sp_tifs))
+      train_mask <- tif_basenames %in% split_info$train |
+                    basename(sp_tifs) %in% split_info$train
+      test_mask <- tif_basenames %in% split_info$test |
+                   basename(sp_tifs) %in% split_info$test
+      # Les fichiers non classes vont dans train
+      unclassed <- !train_mask & !test_mask
+      train_mask <- train_mask | unclassed
+
+      train_tifs <- sp_tifs[train_mask]
+      test_tifs <- sp_tifs[test_mask]
+    } else {
+      # Split aleatoire 90/10
+      set.seed(42)
+      n <- length(sp_tifs)
+      train_idx <- sort(sample.int(n, size = round(n * 0.9)))
+      test_idx <- setdiff(seq_len(n), train_idx)
+      train_tifs <- sp_tifs[train_idx]
+      test_tifs <- sp_tifs[test_idx]
+    }
+
+    for (split in c("train", "test")) {
+      tifs <- if (split == "train") train_tifs else test_tifs
+      if (length(tifs) == 0) next
+      dst <- file.path(output_dir, mod, split, sp)
+      if (!dir.exists(dst)) dir.create(dst, recursive = TRUE)
+      file.copy(tifs, dst, overwrite = FALSE)
+    }
   }
 }
 
