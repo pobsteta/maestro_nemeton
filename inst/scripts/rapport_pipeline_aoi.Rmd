@@ -23,6 +23,9 @@ params:
   inference: FALSE
   gpu: FALSE
   model_id: "IGNF/MAESTRO_FLAIR-HUB_base"
+  use_s2: FALSE
+  use_s1: FALSE
+  date_sentinel: NULL
 ---
 
 ```{r setup, include=FALSE}
@@ -71,6 +74,9 @@ if (has_ggplot2) library(ggplot2)
 aoi_path   <- params$aoi_path
 output_dir <- params$output_dir
 millesime  <- params$millesime
+use_s2     <- isTRUE(params$use_s2)
+use_s1     <- isTRUE(params$use_s1)
+date_sentinel <- params$date_sentinel
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 ```
@@ -82,6 +88,9 @@ dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 | Fichier AOI | `r aoi_path` |
 | Répertoire de sortie | `r output_dir` |
 | Millésime | `r if (is.null(millesime)) "Plus récent (défaut)" else millesime` |
+| Sentinel-2 | `r if (use_s2) "Oui (10 bandes)" else "Non"` |
+| Sentinel-1 | `r if (use_s1) "Oui (VV+VH asc/des)" else "Non"` |
+| Date Sentinel | `r if (is.null(date_sentinel)) "Été année en cours (défaut)" else date_sentinel` |
 | Inférence | `r if (params$inference) "Oui (PyTorch)" else "Non"` |
 | GPU | `r if (params$gpu) "Oui" else "Non (CPU)"` |
 | Modèle | `r params$model_id` |
@@ -281,6 +290,399 @@ knitr::kable(stats, caption = "Statistiques par bande de l'image finale")
 
 ---
 
+# Sentinel-2 (10 bandes spectrales)
+
+```{r s2-init}
+s2_data <- NULL
+```
+
+```{r s2-config, eval=use_s2}
+s2_cfg <- s2_bands_config()
+s2_df <- data.frame(
+  Bande = names(s2_cfg),
+  Nom = sapply(s2_cfg, function(x) x$name),
+  Longueur_onde_nm = sapply(s2_cfg, function(x) x$wavelength),
+  Resolution_m = sapply(s2_cfg, function(x) x$resolution),
+  stringsAsFactors = FALSE
+)
+knitr::kable(s2_df, caption = "Bandes Sentinel-2 utilisées par MAESTRO (10 bandes)",
+             row.names = FALSE)
+```
+
+## Recherche de scènes Sentinel-2
+
+```{r s2-search, eval=use_s2}
+aoi_wgs84 <- st_transform(aoi, 4326)
+bbox_wgs84 <- as.numeric(st_bbox(aoi_wgs84))
+
+if (is.null(date_sentinel)) {
+  annee <- as.integer(format(Sys.Date(), "%Y"))
+  s2_start <- sprintf("%d-05-01", annee)
+  s2_end   <- sprintf("%d-09-30", annee)
+} else {
+  d <- as.Date(date_sentinel)
+  s2_start <- as.character(d - 30)
+  s2_end   <- as.character(d + 30)
+}
+
+cat(sprintf("Recherche S2 : %s → %s\n", s2_start, s2_end))
+
+s2_scenes <- search_s2_stac(bbox_wgs84, s2_start, s2_end, max_cloud = 30)
+
+if (nrow(s2_scenes) > 0) {
+  cat(sprintf("Scènes S2 trouvées : %d\n", nrow(s2_scenes)))
+  knitr::kable(head(s2_scenes, 10),
+               caption = "Scènes Sentinel-2 disponibles (max 10)")
+} else {
+  cat("Aucune scène Sentinel-2 trouvée pour cette période.\n")
+}
+```
+
+## Téléchargement Sentinel-2
+
+```{r s2-download, eval=use_s2}
+s2_data <- download_s2_for_aoi(aoi, output_dir, date_cible = date_sentinel)
+```
+
+```{r s2-summary, eval=use_s2}
+if (!is.null(s2_data)) {
+  cat(sprintf("S2 : %d bandes, %d x %d px, rés. %.0f m\n",
+              nlyr(s2_data), ncol(s2_data), nrow(s2_data), res(s2_data)[1]))
+  cat(sprintf("Bandes : %s\n", paste(names(s2_data), collapse = ", ")))
+} else {
+  cat("Sentinel-2 non disponible.\n")
+}
+```
+
+## Visualisation Sentinel-2
+
+```{r s2-rgb, eval=use_s2, fig.cap="Sentinel-2 en composition colorée RVB (B04-B03-B02)", fig.width=10, fig.height=8}
+if (!is.null(s2_data) && nlyr(s2_data) >= 3) {
+  # B04=Red (bande 3), B03=Green (bande 2), B02=Blue (bande 1)
+  plotRGB(s2_data, r = 3, g = 2, b = 1, stretch = "lin",
+          main = "Sentinel-2 — Vraies couleurs (B04-B03-B02)")
+  plot(st_geometry(st_transform(aoi, st_crs(s2_data))),
+       add = TRUE, border = "yellow", lwd = 2)
+}
+```
+
+```{r s2-irc, eval=use_s2, fig.cap="Sentinel-2 en fausses couleurs IRC (B08-B04-B03)", fig.width=10, fig.height=8}
+if (!is.null(s2_data) && nlyr(s2_data) >= 8) {
+  # B08=NIR (bande 7), B04=Red (bande 3), B03=Green (bande 2)
+  plotRGB(s2_data, r = 7, g = 3, b = 2, stretch = "lin",
+          main = "Sentinel-2 — Fausses couleurs IRC (B08-B04-B03)")
+  plot(st_geometry(st_transform(aoi, st_crs(s2_data))),
+       add = TRUE, border = "yellow", lwd = 2)
+}
+```
+
+## Histogrammes des bandes Sentinel-2
+
+```{r s2-hist, eval=use_s2, fig.cap="Distribution des valeurs par bande Sentinel-2", fig.height=10}
+if (!is.null(s2_data)) {
+  nb <- nlyr(s2_data)
+  ncols <- 3
+  nrows <- ceiling(nb / ncols)
+  par(mfrow = c(nrows, ncols))
+  col_s2 <- colorRampPalette(c("#1f77b4", "#ff7f0e", "#2ca02c",
+                                "#d62728", "#9467bd"))(nb)
+  for (i in seq_len(nb)) {
+    vals <- values(s2_data[[i]], na.rm = TRUE)
+    vals <- vals[is.finite(vals)]
+    if (length(vals) > 0) {
+      hist(vals, breaks = 50, col = adjustcolor(col_s2[i], 0.5),
+           border = NA, main = names(s2_data)[i],
+           xlab = "Réflectance", ylab = "Fréquence")
+    }
+  }
+  par(mfrow = c(1, 1))
+}
+```
+
+## NDVI Sentinel-2
+
+```{r s2-ndvi, eval=use_s2, fig.cap="NDVI calculé à partir de Sentinel-2 (B08 et B04)"}
+if (!is.null(s2_data) && nlyr(s2_data) >= 7) {
+  # B08=NIR (bande 7), B04=Red (bande 3)
+  s2_nir <- s2_data[[7]]
+  s2_red <- s2_data[[3]]
+  s2_ndvi <- (s2_nir - s2_red) / (s2_nir + s2_red + 1e-10)
+  names(s2_ndvi) <- "NDVI_S2"
+
+  col_ndvi <- colorRampPalette(
+    c("#d73027", "#fc8d59", "#fee08b", "#ffffbf",
+      "#d9ef8b", "#91cf60", "#1a9850", "#006837")
+  )(100)
+
+  plot(s2_ndvi, main = "NDVI Sentinel-2", col = col_ndvi, range = c(-0.2, 1))
+  plot(st_geometry(st_transform(aoi, st_crs(s2_ndvi))),
+       add = TRUE, border = "black", lwd = 2)
+
+  s2_ndvi_vals <- values(s2_ndvi, na.rm = TRUE)
+  s2_ndvi_vals <- s2_ndvi_vals[is.finite(s2_ndvi_vals)]
+  cat(sprintf("NDVI S2 : min=%.3f, max=%.3f, moy=%.3f\n",
+              min(s2_ndvi_vals), max(s2_ndvi_vals), mean(s2_ndvi_vals)))
+}
+```
+
+## Statistiques par bande Sentinel-2
+
+```{r s2-stats, eval=use_s2}
+if (!is.null(s2_data)) {
+  stats_s2 <- data.frame(
+    Bande = names(s2_data),
+    Min = sapply(seq_len(nlyr(s2_data)), function(i) {
+      v <- values(s2_data[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(min(v[is.finite(v)]), 1) else NA
+    }),
+    Max = sapply(seq_len(nlyr(s2_data)), function(i) {
+      v <- values(s2_data[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(max(v[is.finite(v)]), 1) else NA
+    }),
+    Moyenne = sapply(seq_len(nlyr(s2_data)), function(i) {
+      v <- values(s2_data[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(mean(v[is.finite(v)]), 1) else NA
+    }),
+    Ecart_type = sapply(seq_len(nlyr(s2_data)), function(i) {
+      v <- values(s2_data[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(sd(v[is.finite(v)]), 1) else NA
+    }),
+    stringsAsFactors = FALSE
+  )
+  knitr::kable(stats_s2, caption = "Statistiques par bande Sentinel-2")
+}
+```
+
+```{r s2-no-msg, eval=!use_s2}
+cat("Sentinel-2 non demandé.\n")
+cat("Pour inclure Sentinel-2, relancez avec use_s2=TRUE.\n")
+```
+
+---
+
+# Sentinel-1 (radar SAR, VV + VH)
+
+```{r s1-init}
+s1_data <- NULL
+```
+
+```{r s1-search, eval=use_s1}
+aoi_wgs84 <- st_transform(aoi, 4326)
+bbox_wgs84 <- as.numeric(st_bbox(aoi_wgs84))
+
+if (is.null(date_sentinel)) {
+  annee <- as.integer(format(Sys.Date(), "%Y"))
+  s1_start <- sprintf("%d-05-01", annee)
+  s1_end   <- sprintf("%d-09-30", annee)
+} else {
+  d <- as.Date(date_sentinel)
+  s1_start <- as.character(d - 30)
+  s1_end   <- as.character(d + 30)
+}
+
+cat(sprintf("Recherche S1 : %s → %s\n", s1_start, s1_end))
+
+s1_scenes <- search_s1_stac(bbox_wgs84, s1_start, s1_end, orbit_direction = "both")
+
+if (nrow(s1_scenes) > 0) {
+  cat(sprintf("Scènes S1 trouvées : %d\n", nrow(s1_scenes)))
+  knitr::kable(head(s1_scenes, 10),
+               caption = "Scènes Sentinel-1 disponibles (max 10)")
+} else {
+  cat("Aucune scène Sentinel-1 trouvée pour cette période.\n")
+}
+```
+
+## Téléchargement Sentinel-1
+
+```{r s1-download, eval=use_s1}
+s1_data <- download_s1_for_aoi(aoi, output_dir, date_cible = date_sentinel)
+```
+
+```{r s1-summary, eval=use_s1}
+if (!is.null(s1_data)) {
+  if (!is.null(s1_data$s1_asc)) {
+    cat(sprintf("S1 ascending  : %d bandes (VV, VH), %d x %d px, rés. %.0f m\n",
+                nlyr(s1_data$s1_asc), ncol(s1_data$s1_asc),
+                nrow(s1_data$s1_asc), res(s1_data$s1_asc)[1]))
+  } else {
+    cat("S1 ascending  : non disponible\n")
+  }
+  if (!is.null(s1_data$s1_des)) {
+    cat(sprintf("S1 descending : %d bandes (VV, VH), %d x %d px, rés. %.0f m\n",
+                nlyr(s1_data$s1_des), ncol(s1_data$s1_des),
+                nrow(s1_data$s1_des), res(s1_data$s1_des)[1]))
+  } else {
+    cat("S1 descending : non disponible\n")
+  }
+} else {
+  cat("Sentinel-1 non disponible.\n")
+}
+```
+
+## Visualisation Sentinel-1 Ascending (VV + VH)
+
+```{r s1-asc-vv, eval=use_s1, fig.cap="Sentinel-1 Ascending — Polarisation VV (rétrodiffusion en dB)"}
+if (!is.null(s1_data) && !is.null(s1_data$s1_asc)) {
+  col_radar <- colorRampPalette(c("#000004", "#3b0f6f", "#8c2981",
+                                   "#de4968", "#fe9f6d", "#fcfdbf"))(100)
+  plot(s1_data$s1_asc[[1]], main = "S1 Ascending — VV",
+       col = col_radar)
+  plot(st_geometry(st_transform(aoi, st_crs(s1_data$s1_asc))),
+       add = TRUE, border = "cyan", lwd = 2)
+}
+```
+
+```{r s1-asc-vh, eval=use_s1, fig.cap="Sentinel-1 Ascending — Polarisation VH (rétrodiffusion en dB)"}
+if (!is.null(s1_data) && !is.null(s1_data$s1_asc) && nlyr(s1_data$s1_asc) >= 2) {
+  plot(s1_data$s1_asc[[2]], main = "S1 Ascending — VH",
+       col = col_radar)
+  plot(st_geometry(st_transform(aoi, st_crs(s1_data$s1_asc))),
+       add = TRUE, border = "cyan", lwd = 2)
+}
+```
+
+## Visualisation Sentinel-1 Descending (VV + VH)
+
+```{r s1-des-vv, eval=use_s1, fig.cap="Sentinel-1 Descending — Polarisation VV (rétrodiffusion en dB)"}
+if (!is.null(s1_data) && !is.null(s1_data$s1_des)) {
+  col_radar <- colorRampPalette(c("#000004", "#3b0f6f", "#8c2981",
+                                   "#de4968", "#fe9f6d", "#fcfdbf"))(100)
+  plot(s1_data$s1_des[[1]], main = "S1 Descending — VV",
+       col = col_radar)
+  plot(st_geometry(st_transform(aoi, st_crs(s1_data$s1_des))),
+       add = TRUE, border = "cyan", lwd = 2)
+}
+```
+
+```{r s1-des-vh, eval=use_s1, fig.cap="Sentinel-1 Descending — Polarisation VH (rétrodiffusion en dB)"}
+if (!is.null(s1_data) && !is.null(s1_data$s1_des) && nlyr(s1_data$s1_des) >= 2) {
+  plot(s1_data$s1_des[[2]], main = "S1 Descending — VH",
+       col = col_radar)
+  plot(st_geometry(st_transform(aoi, st_crs(s1_data$s1_des))),
+       add = TRUE, border = "cyan", lwd = 2)
+}
+```
+
+## Rapport VH/VV (indice de dépolarisation)
+
+```{r s1-ratio, eval=use_s1, fig.cap="Rapport VH/VV — indicateur de structure de la végétation"}
+if (!is.null(s1_data) && !is.null(s1_data$s1_asc) && nlyr(s1_data$s1_asc) >= 2) {
+  vv <- s1_data$s1_asc[[1]]
+  vh <- s1_data$s1_asc[[2]]
+  ratio_vh_vv <- vh / (vv + 1e-10)
+  names(ratio_vh_vv) <- "VH_VV_ratio"
+
+  col_ratio <- colorRampPalette(c("#2166ac", "#67a9cf", "#d1e5f0",
+                                   "#fddbc7", "#ef8a62", "#b2182b"))(100)
+  plot(ratio_vh_vv, main = "Rapport VH/VV (ascending)",
+       col = col_ratio)
+  plot(st_geometry(st_transform(aoi, st_crs(ratio_vh_vv))),
+       add = TRUE, border = "black", lwd = 2)
+
+  ratio_vals <- values(ratio_vh_vv, na.rm = TRUE)
+  ratio_vals <- ratio_vals[is.finite(ratio_vals)]
+  cat(sprintf("VH/VV : min=%.3f, max=%.3f, moy=%.3f\n",
+              min(ratio_vals), max(ratio_vals), mean(ratio_vals)))
+}
+```
+
+## Statistiques Sentinel-1
+
+```{r s1-stats, eval=use_s1}
+.s1_stats <- function(rast, label) {
+  if (is.null(rast)) return(NULL)
+  data.frame(
+    Passage = label,
+    Bande = names(rast),
+    Min = sapply(seq_len(nlyr(rast)), function(i) {
+      v <- values(rast[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(min(v[is.finite(v)]), 2) else NA
+    }),
+    Max = sapply(seq_len(nlyr(rast)), function(i) {
+      v <- values(rast[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(max(v[is.finite(v)]), 2) else NA
+    }),
+    Moyenne = sapply(seq_len(nlyr(rast)), function(i) {
+      v <- values(rast[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(mean(v[is.finite(v)]), 2) else NA
+    }),
+    Ecart_type = sapply(seq_len(nlyr(rast)), function(i) {
+      v <- values(rast[[i]], na.rm = TRUE)
+      if (length(v[is.finite(v)]) > 0) round(sd(v[is.finite(v)]), 2) else NA
+    }),
+    stringsAsFactors = FALSE
+  )
+}
+
+if (!is.null(s1_data)) {
+  stats_s1 <- rbind(
+    .s1_stats(s1_data$s1_asc, "Ascending"),
+    .s1_stats(s1_data$s1_des, "Descending")
+  )
+  if (!is.null(stats_s1) && nrow(stats_s1) > 0) {
+    knitr::kable(stats_s1, caption = "Statistiques Sentinel-1 (VV + VH)",
+                 row.names = FALSE)
+  }
+}
+```
+
+```{r s1-no-msg, eval=!use_s1}
+cat("Sentinel-1 non demandé.\n")
+cat("Pour inclure Sentinel-1, relancez avec use_s1=TRUE.\n")
+```
+
+---
+
+# Alignement des modalités Sentinel
+
+```{r sentinel-align, eval=(use_s2 || use_s1)}
+modalites <- list(aerial = rgbi)
+modalites_noms <- c("aerial")
+
+if (!is.null(mnt_data)) {
+  dem <- aligner_dem_sur_rgbi(mnt_data$mnt, rgbi)
+  modalites$dem <- dem
+  modalites_noms <- c(modalites_noms, "dem")
+}
+
+if (use_s2 && !is.null(s2_data)) {
+  s2_aligned <- aligner_sentinel(s2_data, rgbi, target_res = 10)
+  modalites$s2 <- s2_aligned
+  modalites_noms <- c(modalites_noms, "s2")
+  cat(sprintf("S2 aligné : %d bandes, rés. 10 m\n", nlyr(s2_aligned)))
+
+  s2_path <- file.path(output_dir, "modalite_s2.tif")
+  writeRaster(s2_aligned, s2_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  cat(sprintf("Sauvegardé : %s\n", s2_path))
+}
+
+if (use_s1 && !is.null(s1_data)) {
+  if (!is.null(s1_data$s1_asc)) {
+    s1_asc_aligned <- aligner_sentinel(s1_data$s1_asc, rgbi, target_res = 10)
+    modalites$s1_asc <- s1_asc_aligned
+    modalites_noms <- c(modalites_noms, "s1_asc")
+    cat(sprintf("S1 ascending aligné : %d bandes, rés. 10 m\n", nlyr(s1_asc_aligned)))
+
+    s1a_path <- file.path(output_dir, "modalite_s1_asc.tif")
+    writeRaster(s1_asc_aligned, s1a_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  }
+  if (!is.null(s1_data$s1_des)) {
+    s1_des_aligned <- aligner_sentinel(s1_data$s1_des, rgbi, target_res = 10)
+    modalites$s1_des <- s1_des_aligned
+    modalites_noms <- c(modalites_noms, "s1_des")
+    cat(sprintf("S1 descending aligné : %d bandes, rés. 10 m\n", nlyr(s1_des_aligned)))
+
+    s1d_path <- file.path(output_dir, "modalite_s1_des.tif")
+    writeRaster(s1_des_aligned, s1d_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  }
+}
+
+cat(sprintf("\nModalités disponibles : %s\n", paste(modalites_noms, collapse = " + ")))
+```
+
+---
+
 # Grille de patches
 
 ```{r grille}
@@ -390,21 +792,46 @@ resultats <- NULL
 raster_carte <- NULL
 ```
 
-```{r inference, eval=lancer_inference}
+```{r inference-multimodal, eval=lancer_inference && (use_s2 || use_s1)}
 tryCatch({
-  # Configurer Python
   message("Configuration de l'environnement Python...")
   configurer_python()
 
-  # Télécharger le modèle
   message("Téléchargement du modèle MAESTRO...")
   fichiers_modele <- telecharger_modele(params$model_id)
 
-  # Extraction de tous les patches
+  message("Extraction des patches multi-modaux...")
+  patches_multimodal <- extraire_patches_multimodal(modalites, grille, 250)
+
+  message(sprintf("Inférence multi-modale (%s)...", paste(modalites_noms, collapse = " + ")))
+  predictions <- executer_inference_multimodal(
+    patches_multimodal, fichiers_modele,
+    n_classes = 13L,
+    modalites = modalites_noms,
+    utiliser_gpu = isTRUE(params$gpu)
+  )
+
+  resultats <- assembler_resultats(grille, predictions, dossier_sortie = output_dir)
+  raster_carte <- creer_carte_raster(resultats, 0.2, output_dir)
+  inference_ok <- TRUE
+
+}, error = function(e) {
+  message("Erreur lors de l'inférence multi-modale : ", e$message)
+  message("Le rapport continue sans les prédictions.")
+})
+```
+
+```{r inference-simple, eval=lancer_inference && !(use_s2 || use_s1)}
+tryCatch({
+  message("Configuration de l'environnement Python...")
+  configurer_python()
+
+  message("Téléchargement du modèle MAESTRO...")
+  fichiers_modele <- telecharger_modele(params$model_id)
+
   message("Extraction des patches...")
   patches_all <- extraire_patches_raster(image_finale, grille, 250)
 
-  # Inférence
   message("Inférence MAESTRO...")
   predictions <- executer_inference(
     patches_all, fichiers_modele,
@@ -413,7 +840,6 @@ tryCatch({
     utiliser_gpu = isTRUE(params$gpu)
   )
 
-  # Assemblage des résultats
   resultats <- assembler_resultats(grille, predictions, dossier_sortie = output_dir)
   raster_carte <- creer_carte_raster(resultats, 0.2, output_dir)
   inference_ok <- TRUE
@@ -428,7 +854,7 @@ tryCatch({
 cat("Inférence non demandée.\n")
 cat("Pour générer la carte des essences, relancez avec inference=TRUE :\n\n")
 cat('  rmarkdown::render("inst/scripts/rapport_pipeline_aoi.Rmd",\n')
-cat('    params = list(inference = TRUE))\n')
+cat('    params = list(inference = TRUE, use_s2 = TRUE, use_s1 = TRUE))\n')
 ```
 
 ---
@@ -447,7 +873,6 @@ if (inference_ok && !is.null(raster_carte)) {
 
 ```{r carte-essences-vecteur, eval=lancer_inference, fig.cap="Carte vectorielle des essences par patch", fig.width=10, fig.height=8}
 if (inference_ok && !is.null(resultats)) {
-  # Carte vectorielle colorée par essence
   plot(st_geometry(aoi), col = NA, border = "black", lwd = 2,
        main = sprintf("Essences forestières - %d patches classifiés", nrow(resultats)))
   plot(resultats["classe"], add = TRUE,
@@ -548,7 +973,33 @@ statuts <- c(
   ifelse(nrow(ess) == 13, "OK", "ECHEC")
 )
 
-# Ajouter l'inférence si demandée
+# Sentinel-2
+if (use_s2) {
+  etapes <- c(etapes, "Recherche scènes S2", "Téléchargement Sentinel-2 (10 bandes)")
+  statuts <- c(statuts,
+    ifelse(exists("s2_scenes") && nrow(s2_scenes) > 0, "OK", "ECHEC"),
+    ifelse(!is.null(s2_data), "OK", "ECHEC")
+  )
+}
+
+# Sentinel-1
+if (use_s1) {
+  etapes <- c(etapes, "Recherche scènes S1", "Téléchargement Sentinel-1 (VV+VH)")
+  statuts <- c(statuts,
+    ifelse(exists("s1_scenes") && nrow(s1_scenes) > 0, "OK", "ECHEC"),
+    ifelse(!is.null(s1_data), "OK", "ECHEC")
+  )
+}
+
+# Alignement
+if (use_s2 || use_s1) {
+  etapes <- c(etapes, "Alignement modalités Sentinel")
+  statuts <- c(statuts,
+    ifelse(exists("modalites") && length(modalites) > 2, "OK", "ECHEC")
+  )
+}
+
+# Inférence
 if (lancer_inference) {
   etapes <- c(etapes, "Inférence MAESTRO", "Carte des essences", "Export GeoPackage")
   statuts <- c(statuts,
@@ -565,7 +1016,12 @@ knitr::kable(tests, caption = "Résumé des étapes du pipeline")
 ```{r bilan}
 n_ok <- sum(tests$Statut == "OK")
 n_total <- nrow(tests)
+modalites_txt <- "aerial + DEM"
+if (use_s2) modalites_txt <- paste0(modalites_txt, " + S2")
+if (use_s1) modalites_txt <- paste0(modalites_txt, " + S1")
+
 cat(sprintf("\nBilan : %d / %d étapes réussies\n", n_ok, n_total))
+cat(sprintf("Modalités : %s\n", modalites_txt))
 if (n_ok == n_total) {
   cat("Pipeline complet : toutes les étapes sont validées.\n")
 } else {
