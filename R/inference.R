@@ -20,39 +20,64 @@ configurer_python <- function(envname = CONDA_ENV) {
     stop("Le package 'reticulate' est requis. Installez-le avec : ",
          "install.packages('reticulate')")
   }
-  library(reticulate)
 
   # Eviter le conflit OpenMP sur Windows (torch + numpy livrent chacun libiomp5md.dll)
   Sys.setenv(KMP_DUPLICATE_LIB_OK = "TRUE")
 
-  # Auto-detection de conda (Miniforge, Miniconda, Anaconda) si reticulate
+  # Auto-detection de conda (Miniforge, Miniconda, Anaconda)
+  # On cherche le binaire conda ET le Python de l'environnement AVANT
 
-  # ne le trouve pas tout seul
-  if (is.null(tryCatch(conda_binary(), error = function(e) NULL))) {
-    conda_candidates <- if (.Platform$OS.type == "windows") {
-      home <- Sys.getenv("USERPROFILE", Sys.getenv("HOME"))
-      c(file.path(home, "miniforge3", "condabin", "conda.bat"),
-        file.path(home, "mambaforge", "condabin", "conda.bat"),
-        file.path(home, "miniconda3", "condabin", "conda.bat"),
-        file.path(home, "anaconda3", "condabin", "conda.bat"),
-        file.path(Sys.getenv("LOCALAPPDATA"), "miniforge3", "condabin", "conda.bat"),
-        file.path(Sys.getenv("PROGRAMDATA"), "miniforge3", "condabin", "conda.bat"))
-    } else {
-      home <- Sys.getenv("HOME")
-      c(file.path(home, "miniforge3", "bin", "conda"),
-        file.path(home, "mambaforge", "bin", "conda"),
-        file.path(home, "miniconda3", "bin", "conda"),
-        file.path(home, "anaconda3", "bin", "conda"),
-        "/opt/miniforge3/bin/conda",
-        "/opt/miniconda3/bin/conda")
+  # de charger reticulate pour eviter qu'il s'accroche au mauvais Python.
+  conda_dirs <- if (.Platform$OS.type == "windows") {
+    home <- Sys.getenv("USERPROFILE", Sys.getenv("HOME"))
+    c(file.path(home, "miniforge3"),
+      file.path(home, "mambaforge"),
+      file.path(home, "miniconda3"),
+      file.path(home, "anaconda3"),
+      file.path(Sys.getenv("LOCALAPPDATA"), "miniforge3"),
+      file.path(Sys.getenv("PROGRAMDATA"), "miniforge3"))
+  } else {
+    home <- Sys.getenv("HOME")
+    c(file.path(home, "miniforge3"),
+      file.path(home, "mambaforge"),
+      file.path(home, "miniconda3"),
+      file.path(home, "anaconda3"),
+      "/opt/miniforge3",
+      "/opt/miniconda3")
+  }
+
+  # Chercher le Python de l'environnement conda directement
+  if (nchar(Sys.getenv("RETICULATE_PYTHON")) == 0) {
+    for (conda_root in conda_dirs) {
+      py_path <- if (.Platform$OS.type == "windows") {
+        file.path(conda_root, "envs", envname, "python.exe")
+      } else {
+        file.path(conda_root, "envs", envname, "bin", "python")
+      }
+      if (file.exists(py_path)) {
+        Sys.setenv(RETICULATE_PYTHON = py_path)
+        message("Python de l'env '", envname, "' detecte: ", py_path)
+        break
+      }
     }
-    found <- Filter(file.exists, conda_candidates)
+  }
+
+  # Chercher le binaire conda pour reticulate
+  if (nchar(Sys.getenv("RETICULATE_CONDA")) == 0) {
+    conda_suffix <- if (.Platform$OS.type == "windows") {
+      file.path("condabin", "conda.bat")
+    } else {
+      file.path("bin", "conda")
+    }
+    conda_bins <- file.path(conda_dirs, conda_suffix)
+    found <- Filter(file.exists, conda_bins)
     if (length(found) > 0) {
       Sys.setenv(RETICULATE_CONDA = found[[1]])
       message("Conda detecte automatiquement: ", found[[1]])
     }
   }
 
+  library(reticulate)
   use_condaenv(envname, required = TRUE)
   message("Environnement conda configure: ", envname)
 
