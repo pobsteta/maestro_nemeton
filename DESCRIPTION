@@ -27,7 +27,8 @@ Imports:
     curl,
     fs,
     jsonlite,
-    reticulate
+    reticulate,
+    rstac
 Suggests:
     ggplot2,
     patchwork,

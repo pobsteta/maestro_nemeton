@@ -1,35 +1,22 @@
 # =============================================================================
 # Telechargement de donnees Sentinel-1 et Sentinel-2 via STAC API
-# Backend prioritaire : Copernicus Data Space
-# Fallback : Microsoft Planetary Computer (acces libre, COG natif)
-# Adapte de tree_sat_nemeton (03_data_acquisition.R)
+# Backend : Microsoft Planetary Computer (acces libre, COG natif)
+# Utilise rstac pour la recherche et le signing automatique
+# Adapte de tree_sat_nemeton (08_download_satellite.R)
 # =============================================================================
 
-# --- Configuration des backends STAC ---
+# --- Configuration STAC Planetary Computer ---
 
-#' URLs des catalogues STAC disponibles
 #' @noRd
-.stac_backends <- function() {
+.stac_config <- function() {
   list(
-    copernicus = list(
-      name = "Copernicus Data Space",
-      stac_url = "https://catalogue.dataspace.copernicus.eu/stac/search",
-      s2_collection = "sentinel-2-l2a",
-      s1_collection = "sentinel-1-grd",
-      cloud_field = "eo:cloud_cover",
-      orbit_field = "sat:orbit_state",
-      needs_token = TRUE
-    ),
-    planetary = list(
-      name = "Microsoft Planetary Computer",
-      stac_url = "https://planetarycomputer.microsoft.com/api/stac/v1/search",
-      s2_collection = "sentinel-2-l2a",
-      s1_collection = "sentinel-1-rtc",
-      cloud_field = "eo:cloud_cover",
-      orbit_field = "sat:orbit_state",
-      needs_token = FALSE,
-      signing_url = "https://planetarycomputer.microsoft.com/api/sas/v1/token"
-    )
+    stac_url      = "https://planetarycomputer.microsoft.com/api/stac/v1",
+    s2_collection = "sentinel-2-l2a",
+    s1_collection = "sentinel-1-rtc",
+    s2_bands      = c("B02", "B03", "B04", "B05", "B06", "B07",
+                       "B08", "B8A", "B11", "B12"),
+    s1_assets     = c("vv", "vh"),
+    max_results   = 500L
   )
 }
 
@@ -56,223 +43,202 @@ s2_bands_config <- function() {
   )
 }
 
-# --- Requete STAC generique ---
+# --- Lecture COG distante ---
 
-#' Executer une requete STAC POST /search
+#' Lire un raster COG distant avec fallback telechargement complet
 #'
-#' Fonction interne generique pour interroger un catalogue STAC.
+#' Essaie d'abord /vsicurl/ (lecture partielle), puis telecharge le fichier
+#' complet si la lecture partielle echoue.
 #'
-#' @param stac_url URL de l'endpoint STAC /search
-#' @param collection Nom de la collection
-#' @param bbox Vecteur c(xmin, ymin, xmax, ymax) en WGS84
-#' @param start_date Date de debut
-#' @param end_date Date de fin
-#' @param query_params Liste de filtres supplementaires (optionnel)
-#' @return Liste brute issue du JSON de reponse, ou NULL si echec
+#' @param url URL du fichier COG
+#' @param aoi_vect SpatVector de l'AOI (en WGS84)
+#' @param buffer_m Buffer en metres autour de l'AOI pour le crop
+#' @return SpatRaster croppe sur l'AOI, ou NULL si echec
 #' @noRd
-.stac_search <- function(stac_url, collection, bbox, start_date, end_date,
-                          query_params = NULL, is_copernicus = FALSE) {
-  # Construire le body STAC (sans extension query pour Copernicus qui ne
+.read_remote_cog <- function(url, aoi_vect, buffer_m = 1000) {
+  # Essai 1 : lecture partielle via /vsicurl/
+  r <- tryCatch({
+    r <- terra::rast(paste0("/vsicurl/", url))
+    aoi_native <- terra::project(aoi_vect, terra::crs(r))
+    crop_ext <- terra::ext(terra::buffer(aoi_native, buffer_m))
+    terra::crop(r, crop_ext)
+  }, error = function(e) NULL)
 
-  # la supporte pas — Copernicus utilise CQL2 ou filtrage client-side)
-  body <- list(
-    collections = list(collection),
-    bbox = as.list(bbox),
-    datetime = paste0(start_date, "T00:00:00Z/", end_date, "T23:59:59Z"),
-    limit = 100L
-  )
+  if (!is.null(r)) return(r)
 
-  # Copernicus ne supporte pas l'extension "query" (→ HTTP 400)
-  # On filtre cote client apres reception
-  if (!is.null(query_params) && !is_copernicus) {
-    body$query <- query_params
-  }
+  # Essai 2 : telechargement complet puis lecture locale
+  r <- tryCatch({
+    tmp <- tempfile(fileext = ".tif")
+    utils::download.file(url, tmp, mode = "wb", quiet = TRUE)
+    r <- terra::rast(tmp)
+    aoi_native <- terra::project(aoi_vect, terra::crs(r))
+    crop_ext <- terra::ext(terra::buffer(aoi_native, buffer_m))
+    r <- terra::crop(r, crop_ext)
+    unlink(tmp)
+    r
+  }, error = function(e) NULL)
 
-  body_json <- jsonlite::toJSON(body, auto_unbox = TRUE)
-
-  h <- curl::new_handle()
-  curl::handle_setopt(h,
-    copypostfields = as.character(body_json),
-    httpheader = "Content-Type: application/json"
-  )
-
-  resp <- tryCatch(
-    curl::curl_fetch_memory(stac_url, handle = h),
-    error = function(e) {
-      message(sprintf("  [STAC] Erreur reseau: %s", e$message))
-      return(NULL)
-    }
-  )
-
-  if (is.null(resp) || resp$status_code != 200) {
-    status <- if (!is.null(resp)) resp$status_code else "timeout"
-    message(sprintf("  [STAC] Echec HTTP %s pour %s", status, stac_url))
-    return(NULL)
-  }
-
-  jsonlite::fromJSON(rawToChar(resp$content))
+  r
 }
 
-# --- STAC API (avec fallback) ---
+# --- Recherche STAC via rstac ---
 
-#' Rechercher des scenes Sentinel-2 via STAC (Copernicus + fallback Planetary)
+#' Rechercher des scenes Sentinel-2 via STAC (Planetary Computer)
 #'
-#' Interroge d'abord le catalogue Copernicus Data Space. En cas d'echec,
-#' bascule automatiquement sur Microsoft Planetary Computer.
+#' Interroge le catalogue STAC de Microsoft Planetary Computer pour
+#' trouver des scenes Sentinel-2 L2A. Les URLs sont automatiquement
+#' signees pour l'acces aux donnees COG.
 #'
 #' @param bbox Vecteur numerique c(xmin, ymin, xmax, ymax) en WGS84
 #' @param start_date Date de debut (format "YYYY-MM-DD")
 #' @param end_date Date de fin (format "YYYY-MM-DD")
 #' @param max_cloud Couverture nuageuse maximale en % (defaut: 30)
-#' @return data.frame avec colonnes id, datetime, cloud_cover, source
+#' @return Liste avec `scenes` (data.frame) et `items` (items STAC signes),
+#'   ou NULL si aucune scene trouvee
 #' @export
 search_s2_stac <- function(bbox, start_date, end_date, max_cloud = 30) {
-  message("=== Recherche STAC Sentinel-2 L2A ===")
+  message("=== Recherche STAC Sentinel-2 L2A (Planetary Computer) ===")
+  conf <- .stac_config()
 
-  backends <- .stac_backends()
+  datetime_str <- paste0(start_date, "T00:00:00Z/", end_date, "T23:59:59Z")
 
-  for (backend_name in names(backends)) {
-    backend <- backends[[backend_name]]
-    message(sprintf("  Essai %s...", backend$name))
+  items <- tryCatch({
+    rstac::stac(conf$stac_url) |>
+      rstac::stac_search(
+        collections = conf$s2_collection,
+        bbox        = bbox,
+        datetime    = datetime_str,
+        limit       = conf$max_results
+      ) |>
+      rstac::get_request()
+  }, error = function(e) {
+    message(sprintf("  [STAC] Erreur: %s", e$message))
+    return(NULL)
+  })
 
-    is_cop <- (backend_name == "copernicus")
-
-    # Planetary Computer supporte query extension, Copernicus non
-    query_params <- list()
-    query_params[[backend$cloud_field]] <- list(lte = max_cloud)
-
-    result <- .stac_search(
-      backend$stac_url, backend$s2_collection,
-      bbox, start_date, end_date,
-      query_params = query_params,
-      is_copernicus = is_cop
-    )
-
-    if (is.null(result)) next
-
-    features <- result$features
-    if (is.null(features) || length(features) == 0) {
-      if (is.data.frame(features) && nrow(features) == 0) next
-      if (!is.data.frame(features)) next
-    }
-
-    n_items <- if (is.data.frame(features)) nrow(features) else length(features)
-    if (n_items == 0) next
-
-    scenes <- data.frame(
-      id = features$id,
-      datetime = features$properties$datetime,
-      cloud_cover = features$properties[[backend$cloud_field]],
-      source = backend_name,
-      stringsAsFactors = FALSE
-    )
-
-    scenes$date <- as.Date(substr(scenes$datetime, 1, 10))
-
-    # Filtrage client-side de la couverture nuageuse (necessaire pour Copernicus)
-    if (!is.null(scenes$cloud_cover)) {
-      scenes <- scenes[!is.na(scenes$cloud_cover) & scenes$cloud_cover <= max_cloud, ]
-    }
-
-    if (nrow(scenes) == 0) {
-      message(sprintf("  %s : aucune scene avec nuages <= %d%%", backend$name, max_cloud))
-      next
-    }
-
-    scenes <- scenes[order(scenes$cloud_cover), ]
-
-    message(sprintf("  %d scenes Sentinel-2 L2A trouvees via %s",
-                     nrow(scenes), backend$name))
-
-    return(scenes)
+  if (is.null(items) || length(items$features) == 0) {
+    message("  Aucune scene S2 trouvee")
+    return(NULL)
   }
 
-  message("  Aucune scene trouvee sur aucun backend")
-  data.frame()
+  # Filtrage client-side de la couverture nuageuse
+  items$features <- Filter(function(feat) {
+    cc <- feat$properties$`eo:cloud_cover`
+    !is.null(cc) && cc <= max_cloud
+  }, items$features)
+
+  if (length(items$features) == 0) {
+    message(sprintf("  Aucune scene S2 avec nuages <= %d%%", max_cloud))
+    return(NULL)
+  }
+
+  # Signer les URLs automatiquement via Planetary Computer
+  items_signed <- rstac::items_sign(items,
+                                     sign_fn = rstac::sign_planetary_computer())
+
+  # Construire le data.frame des scenes
+  scenes <- lapply(items_signed$features, function(feat) {
+    data.frame(
+      id          = feat$id %||% NA_character_,
+      datetime    = feat$properties$datetime %||% NA_character_,
+      date        = as.Date(substr(feat$properties$datetime %||% "", 1, 10)),
+      cloud_cover = feat$properties$`eo:cloud_cover` %||% NA_real_,
+      source      = "planetary",
+      stringsAsFactors = FALSE
+    )
+  })
+  result <- do.call(rbind, scenes)
+  result <- result[order(result$cloud_cover), ]
+
+  message(sprintf("  %d scenes Sentinel-2 L2A trouvees", nrow(result)))
+
+  list(scenes = result, items = items_signed)
 }
 
-#' Rechercher des scenes Sentinel-1 via STAC (Copernicus + fallback Planetary)
+#' Rechercher des scenes Sentinel-1 via STAC (Planetary Computer)
 #'
-#' Copernicus fournit des GRD bruts, Planetary Computer fournit des RTC
-#' (Radiometric Terrain Corrected) — deja corrigees du terrain.
+#' Recherche des produits Sentinel-1 RTC (Radiometric Terrain Corrected)
+#' sur Microsoft Planetary Computer. Les produits RTC sont deja corriges
+#' du terrain, avec les polarisations VV et VH disponibles en COG.
 #'
 #' @param bbox Vecteur numerique c(xmin, ymin, xmax, ymax) en WGS84
 #' @param start_date Date de debut
 #' @param end_date Date de fin
 #' @param orbit_direction Direction d'orbite: "ascending", "descending" ou "both"
-#' @return data.frame avec colonnes id, datetime, orbit_direction, source
+#' @return Liste avec `scenes` (data.frame) et `items` (items STAC signes),
+#'   ou NULL si aucun produit trouve
 #' @export
 search_s1_stac <- function(bbox, start_date, end_date,
                             orbit_direction = "both") {
-  message("=== Recherche STAC Sentinel-1 ===")
+  message("=== Recherche STAC Sentinel-1 RTC (Planetary Computer) ===")
+  conf <- .stac_config()
 
-  backends <- .stac_backends()
+  datetime_str <- paste0(start_date, "T00:00:00Z/", end_date, "T23:59:59Z")
 
-  for (backend_name in names(backends)) {
-    backend <- backends[[backend_name]]
-    message(sprintf("  Essai %s (%s)...", backend$name, backend$s1_collection))
+  items <- tryCatch({
+    rstac::stac(conf$stac_url) |>
+      rstac::stac_search(
+        collections = conf$s1_collection,
+        bbox        = bbox,
+        datetime    = datetime_str,
+        limit       = conf$max_results
+      ) |>
+      rstac::get_request()
+  }, error = function(e) {
+    message(sprintf("  [STAC] Erreur: %s", e$message))
+    return(NULL)
+  })
 
-    is_cop <- (backend_name == "copernicus")
-
-    result <- .stac_search(
-      backend$stac_url, backend$s1_collection,
-      bbox, start_date, end_date,
-      is_copernicus = is_cop
-    )
-
-    if (is.null(result)) next
-
-    features <- result$features
-    if (is.null(features) || length(features) == 0) {
-      if (is.data.frame(features) && nrow(features) == 0) next
-      if (!is.data.frame(features)) next
-    }
-
-    n_items <- if (is.data.frame(features)) nrow(features) else length(features)
-    if (n_items == 0) next
-
-    scenes <- data.frame(
-      id = features$id,
-      datetime = features$properties$datetime,
-      source = backend_name,
-      stringsAsFactors = FALSE
-    )
-
-    # Extraire la direction d'orbite si disponible
-    orbit_col <- backend$orbit_field
-    if (!is.null(orbit_col) && orbit_col %in% names(features$properties)) {
-      scenes$orbit_direction <- features$properties[[orbit_col]]
-    } else {
-      scenes$orbit_direction <- NA_character_
-    }
-
-    scenes$date <- as.Date(substr(scenes$datetime, 1, 10))
-
-    # Filtrer par direction d'orbite
-    if (orbit_direction != "both" && any(!is.na(scenes$orbit_direction))) {
-      scenes <- scenes[scenes$orbit_direction == orbit_direction |
-                       is.na(scenes$orbit_direction), ]
-    }
-
-    n_items <- nrow(scenes)
-    if (n_items == 0) next
-
-    message(sprintf("  %d scenes Sentinel-1 trouvees via %s",
-                     n_items, backend$name))
-    return(scenes)
+  if (is.null(items) || length(items$features) == 0) {
+    message("  Aucun produit S1 trouve")
+    return(NULL)
   }
 
-  message("  Aucune scene trouvee sur aucun backend")
-  data.frame()
+  # Filtrage par direction d'orbite si specifie
+  if (orbit_direction != "both") {
+    target <- tolower(orbit_direction)
+    items$features <- Filter(function(feat) {
+      orb <- feat$properties$`sat:orbit_state`
+      !is.null(orb) && tolower(orb) == target
+    }, items$features)
+
+    if (length(items$features) == 0) {
+      message(sprintf("  Aucun produit S1 en orbite %s", orbit_direction))
+      return(NULL)
+    }
+  }
+
+  # Signer les URLs
+  items_signed <- rstac::items_sign(items,
+                                     sign_fn = rstac::sign_planetary_computer())
+
+  # Construire le data.frame des scenes
+  scenes <- lapply(items_signed$features, function(feat) {
+    orb <- feat$properties$`sat:orbit_state` %||% NA_character_
+    data.frame(
+      id              = feat$id %||% NA_character_,
+      datetime        = feat$properties$datetime %||% NA_character_,
+      date            = as.Date(substr(feat$properties$datetime %||% "", 1, 10)),
+      orbit_direction = orb,
+      source          = "planetary",
+      stringsAsFactors = FALSE
+    )
+  })
+  result <- do.call(rbind, scenes)
+  result <- result[order(result$date), ]
+
+  message(sprintf("  %d produits Sentinel-1 RTC trouves", nrow(result)))
+
+  list(scenes = result, items = items_signed)
 }
 
 # --- Telechargement S2 ---
 
 #' Telecharger une image Sentinel-2 pour une AOI
 #'
-#' Telecharge les 10 bandes spectrales Sentinel-2 pour l'AOI.
-#' Essaie d'abord Copernicus Data Space (token requis), puis bascule
-#' sur Planetary Computer (COG en acces libre) si besoin.
+#' Telecharge les 10 bandes spectrales Sentinel-2 L2A depuis
+#' Microsoft Planetary Computer (COG en acces libre). Utilise rstac
+#' pour la recherche et le signing automatique des URLs.
 #'
 #' @param aoi sf object en Lambert-93
 #' @param output_dir Repertoire de sortie
@@ -302,56 +268,129 @@ download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
     end_date <- as.character(d + 30)
   }
 
-  scenes <- search_s2_stac(bbox_wgs84, start_date, end_date, max_cloud = 20)
+  search_result <- search_s2_stac(bbox_wgs84, start_date, end_date,
+                                    max_cloud = 20)
 
-  if (nrow(scenes) == 0) {
+  if (is.null(search_result)) {
     message("  Aucune scene S2, essai sur l'annee entiere...")
     annee <- if (!is.null(date_cible)) format(as.Date(date_cible), "%Y") else
       format(Sys.Date(), "%Y")
-    scenes <- search_s2_stac(bbox_wgs84,
-                              paste0(annee, "-01-01"),
-                              paste0(annee, "-12-31"),
-                              max_cloud = 30)
+    search_result <- search_s2_stac(bbox_wgs84,
+                                      paste0(annee, "-01-01"),
+                                      paste0(annee, "-12-31"),
+                                      max_cloud = 30)
   }
 
-  if (nrow(scenes) == 0) {
+  if (is.null(search_result)) {
     warning("Aucune scene Sentinel-2 trouvee pour cette AOI")
     return(NULL)
   }
 
+  scenes <- search_result$scenes
+  items_signed <- search_result$items
   best <- scenes[1, ]
-  message(sprintf("  Scene selectionnee: %s (nuages: %.0f%%, source: %s)",
-                   best$id, best$cloud_cover, best$source))
+  message(sprintf("  Scene selectionnee: %s (nuages: %.0f%%)",
+                   best$id, best$cloud_cover))
 
-  # Telecharger selon le backend
-  s2_raster <- tryCatch({
-    r <- if (best$source == "planetary") {
-      .download_s2_planetary(best, aoi, output_dir)
-    } else {
-      .download_s2_copernicus(best, aoi, output_dir)
+  # Trouver le feature signe correspondant
+  sel_feature <- NULL
+  for (feat in items_signed$features) {
+    if (feat$id == best$id) {
+      sel_feature <- feat
+      break
     }
-    if (!inherits(r, "SpatRaster")) {
-      message("  [INFO] Resultat non-SpatRaster, raster synthetique")
-      .create_synthetic_s2(aoi, output_dir)
+  }
+
+  if (is.null(sel_feature)) {
+    warning("Feature signe non trouve pour la scene selectionnee")
+    return(NULL)
+  }
+
+  # Telecharger chaque bande via COG
+  conf <- .stac_config()
+  aoi_vect <- terra::vect(aoi_wgs84)
+  layers <- list()
+
+  for (band in conf$s2_bands) {
+    url <- sel_feature$assets[[band]]$href
+    if (is.null(url)) {
+      message(sprintf("  [WARN] Asset %s non disponible", band))
+      next
+    }
+
+    message(sprintf("  Telechargement bande %s...", band))
+    r <- .read_remote_cog(url, aoi_vect)
+
+    if (!is.null(r)) {
+      names(r) <- band
+      layers[[band]] <- r
+      message(sprintf("  %s OK", band))
     } else {
+      message(sprintf("  [WARN] Echec telechargement bande %s", band))
+    }
+  }
+
+  if (length(layers) == 0) {
+    warning("Aucune bande S2 telechargee")
+    return(NULL)
+  }
+
+  message(sprintf("  %d/%d bandes S2 telechargees", length(layers),
+                   length(conf$s2_bands)))
+
+  if (length(layers) < length(conf$s2_bands)) {
+    missing <- setdiff(conf$s2_bands, names(layers))
+    warning(sprintf("Bandes manquantes: %s", paste(missing, collapse = ", ")))
+  }
+
+  # Reprojeter en Lambert-93 et reechantillonner a 10m
+  bbox_l93 <- sf::st_bbox(aoi)
+  ext_aoi <- terra::ext(bbox_l93["xmin"], bbox_l93["xmax"],
+                         bbox_l93["ymin"], bbox_l93["ymax"])
+
+  # Template 10m en Lambert-93
+  template <- terra::rast(ext = ext_aoi, res = 10, crs = "EPSG:2154")
+
+  for (i in seq_along(layers)) {
+    band_name <- names(layers[[i]])
+    layers[[i]] <- tryCatch({
+      r <- terra::project(layers[[i]], "EPSG:2154")
+      r <- terra::resample(r, template, method = "bilinear")
+      names(r) <- band_name
       r
-    }
-  }, error = function(e) {
-    message(sprintf("  [WARN] Echec telechargement S2: %s", e$message))
-    message("  Basculement raster synthetique")
-    .create_synthetic_s2(aoi, output_dir)
-  })
-
-  if (!is.null(s2_raster) && inherits(s2_raster, "SpatRaster")) {
-    tryCatch({
-      terra::writeRaster(s2_raster, s2_path, overwrite = TRUE,
-                         gdal = c("COMPRESS=LZW"))
-      message(sprintf("  Sentinel-2 sauvegarde: %s (%d bandes)",
-                       s2_path, terra::nlyr(s2_raster)))
     }, error = function(e) {
-      message(sprintf("  [WARN] Echec sauvegarde S2: %s", e$message))
+      message(sprintf("  [WARN] Echec reprojection %s: %s", band_name,
+                       e$message))
+      NULL
     })
   }
+  layers <- Filter(Negate(is.null), layers)
+
+  if (length(layers) == 0) {
+    warning("Aucune bande S2 valide apres reprojection")
+    return(NULL)
+  }
+
+  # Combiner les bandes dans l'ordre
+  s2_raster <- tryCatch(
+    do.call(c, layers),
+    error = function(e) {
+      message(sprintf("  [WARN] Echec combinaison bandes: %s", e$message))
+      NULL
+    }
+  )
+
+  if (is.null(s2_raster)) return(NULL)
+
+  # Sauvegarder
+  tryCatch({
+    terra::writeRaster(s2_raster, s2_path, overwrite = TRUE,
+                       gdal = c("COMPRESS=LZW"))
+    message(sprintf("  Sentinel-2 sauvegarde: %s (%d bandes)",
+                     s2_path, terra::nlyr(s2_raster)))
+  }, error = function(e) {
+    message(sprintf("  [WARN] Echec sauvegarde S2: %s", e$message))
+  })
 
   s2_raster
 }
@@ -359,6 +398,10 @@ download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
 # --- Telechargement S1 ---
 
 #' Telecharger les donnees Sentinel-1 pour une AOI
+#'
+#' Telecharge les polarisations VV et VH depuis Planetary Computer
+#' (collection sentinel-1-rtc, deja corrige du terrain).
+#' Les valeurs lineaires (gamma0) sont converties en dB : 10 * log10(val).
 #'
 #' @param aoi sf object en Lambert-93
 #' @param output_dir Repertoire de sortie
@@ -393,31 +436,40 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
     end_date <- as.character(d + 30)
   }
 
-  scenes_asc <- search_s1_stac(bbox_wgs84, start_date, end_date,
-                                orbit_direction = "ascending")
-  scenes_des <- search_s1_stac(bbox_wgs84, start_date, end_date,
-                                orbit_direction = "descending")
-
   result <- list(s1_asc = NULL, s1_des = NULL)
 
-  if (nrow(scenes_asc) > 0) {
-    best <- scenes_asc[1, ]
-    message(sprintf("  Scene ascending: %s (source: %s)", best$id, best$source))
-    result$s1_asc <- .download_s1_scene(best, aoi, output_dir, "ascending")
-    if (!is.null(result$s1_asc)) {
-      terra::writeRaster(result$s1_asc, s1_asc_path, overwrite = TRUE,
-                         gdal = c("COMPRESS=LZW"))
+  # --- Ascending ---
+  if (!file.exists(s1_asc_path)) {
+    search_asc <- search_s1_stac(bbox_wgs84, start_date, end_date,
+                                   orbit_direction = "ascending")
+    if (!is.null(search_asc)) {
+      result$s1_asc <- .download_s1_orbit(search_asc, aoi, "ascending")
+      if (!is.null(result$s1_asc)) {
+        terra::writeRaster(result$s1_asc, s1_asc_path, overwrite = TRUE,
+                           gdal = c("COMPRESS=LZW"))
+        message(sprintf("  S1 ascending sauvegarde: %s", s1_asc_path))
+      }
     }
+  } else {
+    result$s1_asc <- terra::rast(s1_asc_path)
+    message("  Cache: S1 ascending")
   }
 
-  if (nrow(scenes_des) > 0) {
-    best <- scenes_des[1, ]
-    message(sprintf("  Scene descending: %s (source: %s)", best$id, best$source))
-    result$s1_des <- .download_s1_scene(best, aoi, output_dir, "descending")
-    if (!is.null(result$s1_des)) {
-      terra::writeRaster(result$s1_des, s1_des_path, overwrite = TRUE,
-                         gdal = c("COMPRESS=LZW"))
+  # --- Descending ---
+  if (!file.exists(s1_des_path)) {
+    search_des <- search_s1_stac(bbox_wgs84, start_date, end_date,
+                                   orbit_direction = "descending")
+    if (!is.null(search_des)) {
+      result$s1_des <- .download_s1_orbit(search_des, aoi, "descending")
+      if (!is.null(result$s1_des)) {
+        terra::writeRaster(result$s1_des, s1_des_path, overwrite = TRUE,
+                           gdal = c("COMPRESS=LZW"))
+        message(sprintf("  S1 descending sauvegarde: %s", s1_des_path))
+      }
     }
+  } else {
+    result$s1_des <- terra::rast(s1_des_path)
+    message("  Cache: S1 descending")
   }
 
   has_data <- !is.null(result$s1_asc) || !is.null(result$s1_des)
@@ -429,658 +481,100 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
   result
 }
 
-
-# ---------------------------------------------------------------------------
-# Fonctions internes de telechargement — Copernicus Data Space
-# ---------------------------------------------------------------------------
-
+#' Telecharger les bandes S1 pour une orbite donnee
 #' @noRd
-.download_s2_copernicus <- function(scene, aoi, output_dir) {
-  message("  Telechargement S2 via Copernicus Data Space...")
+.download_s1_orbit <- function(search_result, aoi, orbit) {
+  scenes <- search_result$scenes
+  items_signed <- search_result$items
+  best <- scenes[1, ]
+  message(sprintf("  Scene S1 %s: %s", orbit, best$id))
 
-  token <- Sys.getenv("COPERNICUS_TOKEN", "")
-
-  if (nchar(token) == 0) {
-    message("  [INFO] Token Copernicus non configure")
-    message("  Utilisez: Sys.setenv(COPERNICUS_TOKEN = 'votre_token')")
-    message("  Basculement sur Planetary Computer...")
-    return(.download_s2_planetary(scene, aoi, output_dir))
-  }
-
-  scene_id <- scene$id
-  odata_url <- sprintf(
-    "https://catalogue.dataspace.copernicus.eu/odata/v1/Products?$filter=Name eq '%s'",
-    scene_id
-  )
-
-  h <- curl::new_handle()
-  resp <- tryCatch(
-    curl::curl_fetch_memory(odata_url, handle = h),
-    error = function(e) NULL
-  )
-
-  if (is.null(resp) || resp$status_code != 200) {
-    message("  [INFO] OData inaccessible, basculement sur Planetary Computer...")
-    return(.download_s2_planetary(scene, aoi, output_dir))
-  }
-
-  odata <- jsonlite::fromJSON(rawToChar(resp$content))
-
-  if (length(odata$value) == 0) {
-    message("  [INFO] Scene non trouvee via OData, basculement sur Planetary...")
-    return(.download_s2_planetary(scene, aoi, output_dir))
-  }
-
-  # Telechargement via OData avec token
-  product_id <- odata$value$Id[1]
-  download_url <- sprintf(
-    "https://zipper.dataspace.copernicus.eu/odata/v1/Products(%s)/$value",
-    product_id
-  )
-
-  dest_zip <- file.path(output_dir, "s2_scene.zip")
-  h_dl <- curl::new_handle()
-  curl::handle_setheaders(h_dl, Authorization = paste("Bearer", token))
-
-  dl_ok <- tryCatch({
-    curl::curl_download(download_url, dest_zip, handle = h_dl)
-    TRUE
-  }, error = function(e) {
-    message("  Echec telechargement Copernicus: ", e$message)
-    FALSE
-  })
-
-  if (!dl_ok || !file.exists(dest_zip)) {
-    message("  Basculement sur Planetary Computer...")
-    return(.download_s2_planetary(scene, aoi, output_dir))
-  }
-
-  # Extraire les bandes du ZIP SAFE
-  .extract_s2_from_safe(dest_zip, aoi, output_dir)
-}
-
-#' @noRd
-.extract_s2_from_safe <- function(zip_path, aoi, output_dir) {
-  message("  Extraction des bandes depuis l'archive SAFE...")
-
-  extract_dir <- file.path(output_dir, "s2_safe_tmp")
-  dir.create(extract_dir, showWarnings = FALSE, recursive = TRUE)
-  utils::unzip(zip_path, exdir = extract_dir)
-
-  band_names <- c("B02", "B03", "B04", "B05", "B06", "B07",
-                  "B08", "B8A", "B11", "B12")
-
-  # Chercher les fichiers JP2 des bandes 10m et 20m
-  all_files <- list.files(extract_dir, pattern = "\\.jp2$",
-                          recursive = TRUE, full.names = TRUE)
-
-  layers <- list()
-  bbox_l93 <- sf::st_bbox(aoi)
-  ext_aoi <- terra::ext(bbox_l93["xmin"], bbox_l93["xmax"],
-                         bbox_l93["ymin"], bbox_l93["ymax"])
-
-  for (band in band_names) {
-    pattern <- sprintf("_%s_", band)
-    band_files <- grep(pattern, all_files, value = TRUE)
-
-    # Privilegier la resolution 10m, sinon 20m
-    f10 <- grep("R10m", band_files, value = TRUE)
-    f20 <- grep("R20m", band_files, value = TRUE)
-    band_file <- if (length(f10) > 0) f10[1] else if (length(f20) > 0) f20[1] else NULL
-
-    if (is.null(band_file)) {
-      message(sprintf("  [WARN] Bande %s non trouvee", band))
-      next
-    }
-
-    r <- terra::rast(band_file)
-    # Reprojeter en Lambert-93 si necessaire
-    if (!grepl("2154", terra::crs(r, describe = TRUE)$code %||% "")) {
-      r <- terra::project(r, "EPSG:2154")
-    }
-    r <- terra::crop(r, ext_aoi)
-    names(r) <- band
-    layers[[band]] <- r
-  }
-
-  # Nettoyer
-  unlink(extract_dir, recursive = TRUE)
-  unlink(zip_path)
-
-  if (length(layers) == 0) return(NULL)
-
-  # Reechantillonner toutes les bandes a 10m
-  ref <- layers[[1]]
-  for (i in seq_along(layers)) {
-    if (terra::res(layers[[i]])[1] != terra::res(ref)[1]) {
-      layers[[i]] <- terra::resample(layers[[i]], ref, method = "bilinear")
-    }
-  }
-
-  do.call(c, layers)
-}
-
-
-# ---------------------------------------------------------------------------
-# Fonctions internes de telechargement — Planetary Computer
-# ---------------------------------------------------------------------------
-
-#' Signer une URL Planetary Computer pour l'acces aux donnees
-#' @noRd
-.pc_sign_url <- function(href) {
-  # Planetary Computer necessite un token SAS pour acceder aux blobs
-  # L'API de signing genere automatiquement un token temporaire
-  # Format: on ajoute le token SAS a l'URL du blob
-
-  # Extraire account et container depuis l'URL
-  parsed <- regmatches(href, regexec(
-    "https://([^.]+)\\.blob\\.core\\.windows\\.net/([^/]+)/(.*)", href
-  ))[[1]]
-
-  if (length(parsed) < 4) return(href)
-
-  account <- parsed[2]
-  container <- parsed[3]
-
-  signing_url <- sprintf(
-    "https://planetarycomputer.microsoft.com/api/sas/v1/token/%s/%s",
-    account, container
-  )
-
-  h <- curl::new_handle()
-  resp <- tryCatch(
-    curl::curl_fetch_memory(signing_url, handle = h),
-    error = function(e) NULL
-  )
-
-  if (is.null(resp) || resp$status_code != 200) return(href)
-
-  token_data <- jsonlite::fromJSON(rawToChar(resp$content))
-  paste0(href, "?", token_data$token)
-}
-
-#' Telecharger S2 depuis Planetary Computer (COG natif)
-#' @noRd
-.download_s2_planetary <- function(scene, aoi, output_dir) {
-  message("  Telechargement S2 via Planetary Computer (COG)...")
-
-  # Rechercher la scene specifique dans le catalogue Planetary Computer
-  pc_url <- "https://planetarycomputer.microsoft.com/api/stac/v1/search"
-
-  # Retrouver la scene par sa date et sa bbox
-  bbox_wgs84 <- as.numeric(sf::st_bbox(sf::st_transform(aoi, 4326)))
-  scene_date <- as.Date(substr(scene$datetime, 1, 10))
-
-  body <- list(
-    collections = list("sentinel-2-l2a"),
-    bbox = as.list(bbox_wgs84),
-    datetime = paste0(scene_date, "T00:00:00Z/", scene_date, "T23:59:59Z"),
-    limit = 5L
-  )
-
-  body_json <- jsonlite::toJSON(body, auto_unbox = TRUE)
-  h <- curl::new_handle()
-  curl::handle_setopt(h,
-    copypostfields = as.character(body_json),
-    httpheader = "Content-Type: application/json"
-  )
-
-  resp <- tryCatch(
-    curl::curl_fetch_memory(pc_url, handle = h),
-    error = function(e) NULL
-  )
-
-  if (is.null(resp) || resp$status_code != 200) {
-    message("  [INFO] Planetary Computer inaccessible, raster synthetique")
-    return(.create_synthetic_s2(aoi, output_dir))
-  }
-
-  items <- jsonlite::fromJSON(rawToChar(resp$content), simplifyVector = FALSE)
-
-  if (length(items$features) == 0) {
-    message("  [INFO] Scene non trouvee sur Planetary Computer")
-    return(.create_synthetic_s2(aoi, output_dir))
-  }
-
-  feature <- items$features[[1]]
-  assets <- feature$assets
-
-  # Lister les cles d'assets disponibles pour debug
-  asset_keys <- names(assets)
-  message(sprintf("  Assets disponibles: %s", paste(asset_keys, collapse = ", ")))
-
-  # Planetary Computer utilise des noms d'assets varies selon les scenes :
-  #   - "B02", "B03", ... (direct) — scenes recentes
-  #   - "B02_10m", "B05_20m", ... — certaines scenes
-  #   - "coastal", "blue", "green", "red", "rededge1", ... — noms semantiques
-  band_mapping <- list(
-    B02 = c("B02", "b02", "B02_10m", "blue"),
-    B03 = c("B03", "b03", "B03_10m", "green"),
-    B04 = c("B04", "b04", "B04_10m", "red"),
-    B05 = c("B05", "b05", "B05_20m", "rededge1", "RE1"),
-    B06 = c("B06", "b06", "B06_20m", "rededge2", "RE2"),
-    B07 = c("B07", "b07", "B07_20m", "rededge3", "RE3"),
-    B08 = c("B08", "b08", "B08_10m", "nir", "nir08"),
-    B8A = c("B8A", "b8a", "B8A_20m", "nir09"),
-    B11 = c("B11", "b11", "B11_20m", "swir16"),
-    B12 = c("B12", "b12", "B12_20m", "swir22")
-  )
-
-  bbox_l93 <- sf::st_bbox(aoi)
-  ext_aoi <- terra::ext(bbox_l93["xmin"], bbox_l93["xmax"],
-                         bbox_l93["ymin"], bbox_l93["ymax"])
-
-  # Signer une seule fois le token SAS (reutilise pour toutes les bandes)
-  sas_token <- NULL
-  sample_href <- NULL
-  for (a in assets) {
-    if (!is.null(a$href) && grepl("blob\\.core\\.windows\\.net", a$href)) {
-      sample_href <- a$href
+  # Trouver le feature signe
+  sel_feature <- NULL
+  for (feat in items_signed$features) {
+    if (feat$id == best$id) {
+      sel_feature <- feat
       break
     }
   }
-  if (!is.null(sample_href)) {
-    signed <- .pc_sign_url(sample_href)
-    if (signed != sample_href) {
-      sas_token <- sub(".*\\?", "?", signed)
-    }
+
+  if (is.null(sel_feature)) {
+    message(sprintf("  [WARN] Feature signe non trouve pour S1 %s", orbit))
+    return(NULL)
   }
 
+  conf <- .stac_config()
+  aoi_wgs84 <- sf::st_transform(aoi, 4326)
+  aoi_vect <- terra::vect(aoi_wgs84)
   layers <- list()
 
-  for (band_name in names(band_mapping)) {
-    keys_to_try <- band_mapping[[band_name]]
+  for (asset_name in conf$s1_assets) {
+    pol <- toupper(asset_name)
+    url <- sel_feature$assets[[asset_name]]$href
 
-    href <- NULL
-    for (key in keys_to_try) {
-      if (!is.null(assets[[key]])) {
-        href <- assets[[key]]$href
-        break
-      }
-    }
-
-    if (is.null(href)) {
-      message(sprintf("  [INFO] Asset %s non trouve (cles: %s)",
-                       band_name, paste(keys_to_try, collapse = "/")))
+    if (is.null(url)) {
+      message(sprintf("  [WARN] Asset S1 '%s' non disponible", asset_name))
       next
     }
 
-    # Ajouter le token SAS si disponible
-    signed_href <- if (!is.null(sas_token) && !grepl("\\?", href)) {
-      paste0(href, sas_token)
+    message(sprintf("  Telechargement %s %s...", orbit, pol))
+    r <- .read_remote_cog(url, aoi_vect)
+
+    if (!is.null(r)) {
+      # Conversion gamma0 lineaire -> dB
+      vals <- terra::values(r)
+      vals[vals <= 0] <- NA
+      vals <- 10 * log10(vals)
+      terra::values(r) <- vals
+      names(r) <- pol
+      layers[[asset_name]] <- r
+      message(sprintf("  %s %s OK", orbit, pol))
     } else {
-      .pc_sign_url(href)
+      message(sprintf("  [WARN] Echec telechargement S1 %s %s", orbit, pol))
     }
-
-    # Lire le COG avec GDAL via /vsicurl/
-    # Configurer les options GDAL pour meilleure robustesse
-    r <- tryCatch({
-      vsicurl_path <- sprintf("/vsicurl/%s", signed_href)
-      band_r <- terra::rast(vsicurl_path)
-
-      # Cropper d'abord dans le CRS natif (UTM) pour reduire les donnees
-      aoi_utm <- sf::st_transform(aoi, terra::crs(band_r))
-      ext_utm <- terra::ext(as.numeric(sf::st_bbox(aoi_utm)))
-      band_r <- terra::crop(band_r, ext_utm)
-
-      # Puis reprojeter en Lambert-93
-      band_r <- terra::project(band_r, "EPSG:2154")
-      band_r <- terra::crop(band_r, ext_aoi)
-
-      names(band_r) <- band_name
-      band_r
-    }, error = function(e) {
-      message(sprintf("  [WARN] Echec lecture COG %s: %s", band_name, e$message))
-      NULL
-    }, warning = function(w) {
-      message(sprintf("  [WARN] Avertissement COG %s: %s", band_name, w$message))
-      # Continuer malgre les warnings GDAL
-      tryCatch({
-        vsicurl_path <- sprintf("/vsicurl/%s", signed_href)
-        band_r <- suppressWarnings(terra::rast(vsicurl_path))
-        aoi_utm <- sf::st_transform(aoi, terra::crs(band_r))
-        ext_utm <- terra::ext(as.numeric(sf::st_bbox(aoi_utm)))
-        band_r <- suppressWarnings(terra::crop(band_r, ext_utm))
-        band_r <- suppressWarnings(terra::project(band_r, "EPSG:2154"))
-        band_r <- suppressWarnings(terra::crop(band_r, ext_aoi))
-        names(band_r) <- band_name
-        band_r
-      }, error = function(e2) {
-        message(sprintf("  [WARN] Echec definitif COG %s: %s", band_name, e2$message))
-        NULL
-      })
-    })
-
-    if (!is.null(r)) layers[[band_name]] <- r
   }
 
   if (length(layers) == 0) {
-    message("  [INFO] Aucune bande COG lisible, raster synthetique")
-    return(.create_synthetic_s2(aoi, output_dir))
+    message(sprintf("  Aucune bande S1 %s telechargee", orbit))
+    return(NULL)
   }
 
-  message(sprintf("  %d/%d bandes S2 telechargees via Planetary Computer",
-                   length(layers), length(band_mapping)))
-
-  # Reechantillonner a 10m sur la meme grille
-  ref <- layers[[1]]
-  if (terra::res(ref)[1] != 10) {
-    template <- terra::rast(ext = terra::ext(ref), res = 10,
-                             crs = terra::crs(ref))
-    ref <- terra::resample(ref, template, method = "bilinear")
-    layers[[1]] <- ref
-  }
-  for (i in seq_along(layers)[-1]) {
-    ok <- tryCatch({
-      if (terra::res(layers[[i]])[1] != 10 ||
-          !terra::compareGeom(layers[[i]], ref, stopOnError = FALSE)) {
-        layers[[i]] <- terra::resample(layers[[i]], ref, method = "bilinear")
-      }
-      TRUE
-    }, error = function(e) {
-      message(sprintf("  [WARN] Echec resample bande %s: %s",
-                       names(layers[[i]]), e$message))
-      FALSE
-    })
-    if (!ok) layers[[i]] <- NULL
-  }
-  layers <- Filter(Negate(is.null), layers)
-
-  if (length(layers) == 0) {
-    message("  [INFO] Aucune bande valide apres resample, raster synthetique")
-    return(.create_synthetic_s2(aoi, output_dir))
-  }
-
-  # Completer les bandes manquantes avec des valeurs synthetiques
-  all_bands <- names(band_mapping)
-  got_bands <- vapply(layers, function(x) names(x), character(1))
-
-  typical_vegetation <- c(
-    B02 = 350, B03 = 600, B04 = 400, B05 = 1500, B06 = 2500,
-    B07 = 3000, B08 = 3200, B8A = 3100, B11 = 1800, B12 = 800
-  )
-
-  for (band in all_bands) {
-    if (!band %in% got_bands) {
-      message(sprintf("  [INFO] Bande %s manquante, complement synthetique", band))
-      synth <- ref
-      n_cells <- terra::ncell(synth)
-      terra::values(synth) <- stats::rnorm(
-        n_cells, mean = typical_vegetation[[band]],
-        sd = typical_vegetation[[band]] * 0.15
-      )
-      terra::values(synth) <- pmax(0, pmin(10000, terra::values(synth)))
-      names(synth) <- band
-      layers[[band]] <- synth
-    }
-  }
-
-  # Ordonner les bandes dans l'ordre attendu
-  ordered_layers <- list()
-  for (band in all_bands) {
-    idx <- which(vapply(layers, function(x) names(x), character(1)) == band)
-    if (length(idx) > 0) ordered_layers[[band]] <- layers[[idx[1]]]
-  }
-
-  result <- tryCatch(
-    do.call(c, ordered_layers),
-    error = function(e) {
-      message(sprintf("  [WARN] Echec combinaison bandes: %s", e$message))
-      message("  Basculement raster synthetique complet")
-      .create_synthetic_s2(aoi, output_dir)
-    }
-  )
-
-  result
-}
-
-
-# ---------------------------------------------------------------------------
-# Fonctions internes de telechargement — Sentinel-1
-# ---------------------------------------------------------------------------
-
-#' @noRd
-.download_s1_scene <- function(scene, aoi, output_dir, orbit) {
-  if (scene$source == "planetary") {
-    return(.download_s1_planetary(scene, aoi, output_dir, orbit))
-  }
-
-  # Copernicus Data Space
-  message(sprintf("  Telechargement S1 %s via Copernicus Data Space...", orbit))
-
-  token <- Sys.getenv("COPERNICUS_TOKEN", "")
-
-  if (nchar(token) == 0) {
-    message("  [INFO] Token Copernicus non configure, essai Planetary Computer...")
-    return(.download_s1_planetary(scene, aoi, output_dir, orbit))
-  }
-
-  scene_id <- scene$id
-  download_url <- sprintf(
-    "https://zipper.dataspace.copernicus.eu/odata/v1/Products(%s)/$value",
-    scene_id
-  )
-
-  h <- curl::new_handle()
-  curl::handle_setheaders(h, Authorization = paste("Bearer", token))
-
-  dest_file <- file.path(output_dir, sprintf("s1_%s_raw.zip", orbit))
-  dl_ok <- tryCatch({
-    curl::curl_download(download_url, dest_file, handle = h)
-    TRUE
-  }, error = function(e) {
-    message("  Echec telechargement Copernicus: ", e$message)
-    FALSE
-  })
-
-  if (!dl_ok) {
-    message("  Basculement sur Planetary Computer...")
-    return(.download_s1_planetary(scene, aoi, output_dir, orbit))
-  }
-
-  # TODO: extraire VV/VH du SAFE S1
-  # Pour l'instant on genere un synthetique
-  message("  [INFO] Extraction SAFE S1 non encore implementee")
-  .create_synthetic_s1(aoi, output_dir, orbit)
-}
-
-#' Telecharger S1 RTC depuis Planetary Computer
-#' @noRd
-.download_s1_planetary <- function(scene, aoi, output_dir, orbit) {
-  message(sprintf("  Telechargement S1 %s via Planetary Computer (RTC)...", orbit))
-
-  pc_url <- "https://planetarycomputer.microsoft.com/api/stac/v1/search"
-
-  bbox_wgs84 <- as.numeric(sf::st_bbox(sf::st_transform(aoi, 4326)))
-  scene_date <- as.Date(substr(scene$datetime, 1, 10))
-
-  # Planetary Computer: sentinel-1-rtc (Radiometric Terrain Corrected)
-  body <- list(
-    collections = list("sentinel-1-rtc"),
-    bbox = as.list(bbox_wgs84),
-    datetime = paste0(scene_date, "T00:00:00Z/", scene_date, "T23:59:59Z"),
-    limit = 5L
-  )
-
-  body_json <- jsonlite::toJSON(body, auto_unbox = TRUE)
-  h <- curl::new_handle()
-  curl::handle_setopt(h,
-    copypostfields = as.character(body_json),
-    httpheader = "Content-Type: application/json"
-  )
-
-  resp <- tryCatch(
-    curl::curl_fetch_memory(pc_url, handle = h),
-    error = function(e) NULL
-  )
-
-  if (is.null(resp) || resp$status_code != 200) {
-    message("  [INFO] Planetary Computer S1 inaccessible, raster synthetique")
-    return(.create_synthetic_s1(aoi, output_dir, orbit))
-  }
-
-  items <- jsonlite::fromJSON(rawToChar(resp$content), simplifyVector = FALSE)
-
-  if (length(items$features) == 0) {
-    message("  [INFO] Aucune scene S1 RTC trouvee")
-    return(.create_synthetic_s1(aoi, output_dir, orbit))
-  }
-
-  feature <- items$features[[1]]
-  assets <- feature$assets
-
+  # Reprojeter en Lambert-93 et reechantillonner a 10m
   bbox_l93 <- sf::st_bbox(aoi)
   ext_aoi <- terra::ext(bbox_l93["xmin"], bbox_l93["xmax"],
                          bbox_l93["ymin"], bbox_l93["ymax"])
+  template <- terra::rast(ext = ext_aoi, res = 10, crs = "EPSG:2154")
 
-  layers <- list()
-
-  for (pol in c("vv", "vh")) {
-    if (is.null(assets[[pol]])) {
-      message(sprintf("  [INFO] Asset S1 '%s' non trouve", pol))
-      next
-    }
-
-    href <- assets[[pol]]$href
-    signed_href <- .pc_sign_url(href)
-
-    r <- tryCatch({
-      band_r <- terra::rast(sprintf("/vsicurl/%s", signed_href))
-      # Cropper dans le CRS natif d'abord pour reduire le volume
-      aoi_native <- sf::st_transform(aoi, terra::crs(band_r))
-      ext_native <- terra::ext(as.numeric(sf::st_bbox(aoi_native)))
-      band_r <- terra::crop(band_r, ext_native)
-      band_r <- terra::project(band_r, "EPSG:2154")
-      band_r <- terra::crop(band_r, ext_aoi)
-      names(band_r) <- toupper(pol)
-      band_r
+  for (i in seq_along(layers)) {
+    pol_name <- names(layers[[i]])
+    layers[[i]] <- tryCatch({
+      r <- terra::project(layers[[i]], "EPSG:2154")
+      r <- terra::resample(r, template, method = "bilinear")
+      names(r) <- pol_name
+      r
     }, error = function(e) {
-      message(sprintf("  [WARN] Echec lecture COG S1 %s: %s", pol, e$message))
+      message(sprintf("  [WARN] Echec reprojection S1 %s: %s", pol_name,
+                       e$message))
       NULL
     })
-
-    if (!is.null(r)) layers[[pol]] <- r
   }
+  layers <- Filter(Negate(is.null), layers)
 
-  if (length(layers) == 0) {
-    message("  [INFO] Aucune bande S1 lisible, raster synthetique")
-    return(.create_synthetic_s1(aoi, output_dir, orbit))
-  }
+  if (length(layers) == 0) return(NULL)
 
-  # Reechantillonner a 10m
-  ref <- layers[[1]]
-  if (terra::res(ref)[1] != 10) {
-    template <- terra::rast(ext = terra::ext(ref), res = 10,
-                             crs = terra::crs(ref))
-    ref <- terra::resample(ref, template, method = "bilinear")
-    layers[[1]] <- ref
-  }
-  for (i in seq_along(layers)[-1]) {
-    layers[[i]] <- terra::resample(layers[[i]], ref, method = "bilinear")
-  }
-
-  message(sprintf("  S1 %s: %d bandes (VV, VH) via Planetary Computer",
-                   orbit, length(layers)))
-  do.call(c, layers)
-}
-
-
-# ---------------------------------------------------------------------------
-# Rasters synthetiques (fallback pour tests)
-# ---------------------------------------------------------------------------
-
-#' Creer un raster Sentinel-2 synthetique pour tests
-#'
-#' Produit un raster 10 bandes a 10m de resolution avec des valeurs
-#' realistes pour tester le pipeline sans donnees reelles.
-#'
-#' @param aoi sf object en Lambert-93
-#' @param output_dir Repertoire de sortie
-#' @return SpatRaster 10 bandes
-#' @noRd
-.create_synthetic_s2 <- function(aoi, output_dir) {
-  message("  Creation raster S2 synthetique (10 bandes, 10m)...")
-
-  bbox <- sf::st_bbox(aoi)
-  r <- terra::rast(
-    xmin = bbox["xmin"], xmax = bbox["xmax"],
-    ymin = bbox["ymin"], ymax = bbox["ymax"],
-    res = 10,
-    crs = sf::st_crs(aoi)$wkt
+  s1 <- tryCatch(
+    do.call(c, layers),
+    error = function(e) {
+      message(sprintf("  [WARN] Echec combinaison S1 %s: %s", orbit,
+                       e$message))
+      NULL
+    }
   )
 
-  band_names <- c("B02", "B03", "B04", "B05", "B06", "B07",
-                  "B08", "B8A", "B11", "B12")
-
-  # Reflectances typiques de vegetation (x10000)
-  typical_vegetation <- c(
-    350,   # B02 Blue
-    600,   # B03 Green
-    400,   # B04 Red
-    1500,  # B05 RedEdge1
-    2500,  # B06 RedEdge2
-    3000,  # B07 RedEdge3
-    3200,  # B08 NIR
-    3100,  # B8A NIR2
-    1800,  # B11 SWIR1
-    800    # B12 SWIR2
-  )
-
-  layers <- list()
-  n_cells <- terra::ncell(r)
-  for (i in seq_along(band_names)) {
-    layer <- r
-    noise <- stats::rnorm(n_cells, mean = typical_vegetation[i],
-                          sd = typical_vegetation[i] * 0.15)
-    noise <- pmax(0, pmin(10000, noise))
-    terra::values(layer) <- noise
-    names(layer) <- band_names[i]
-    layers[[i]] <- layer
+  if (!is.null(s1)) {
+    message(sprintf("  S1 %s: %d bandes (VV, VH)", orbit, terra::nlyr(s1)))
   }
 
-  s2 <- do.call(c, layers)
-  message(sprintf("  S2 synthetique: %d x %d px, 10 bandes, 10m",
-                   terra::ncol(s2), terra::nrow(s2)))
-  s2
-}
-
-#' Creer un raster Sentinel-1 synthetique pour tests
-#'
-#' Produit un raster 2 bandes (VV, VH) a 10m avec des valeurs
-#' de retrodiffusion radar realistes en dB.
-#'
-#' @param aoi sf object en Lambert-93
-#' @param output_dir Repertoire de sortie
-#' @param orbit "ascending" ou "descending"
-#' @return SpatRaster 2 bandes
-#' @noRd
-.create_synthetic_s1 <- function(aoi, output_dir, orbit = "ascending") {
-  message(sprintf("  Creation raster S1 synthetique (%s, 2 bandes, 10m)...",
-                   orbit))
-
-  bbox <- sf::st_bbox(aoi)
-  r <- terra::rast(
-    xmin = bbox["xmin"], xmax = bbox["xmax"],
-    ymin = bbox["ymin"], ymax = bbox["ymax"],
-    res = 10,
-    crs = sf::st_crs(aoi)$wkt
-  )
-
-  n_cells <- terra::ncell(r)
-
-  # VV: typiquement -8 a -15 dB pour la vegetation
-  vv <- r
-  terra::values(vv) <- stats::rnorm(n_cells, mean = -10, sd = 3)
-  names(vv) <- "VV"
-
-  # VH: typiquement -15 a -22 dB pour la vegetation
-  vh <- r
-  terra::values(vh) <- stats::rnorm(n_cells, mean = -17, sd = 3)
-  names(vh) <- "VH"
-
-  s1 <- c(vv, vh)
-  message(sprintf("  S1 synthetique: %d x %d px, 2 bandes (VV, VH)",
-                   terra::ncol(s1), terra::nrow(s1)))
   s1
 }
 
