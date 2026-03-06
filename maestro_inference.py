@@ -309,6 +309,69 @@ class MAESTROClassifier(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Utilitaire pour resoudre les symlinks casses du cache HuggingFace (Windows)
+# ---------------------------------------------------------------------------
+
+def _resoudre_chemin_hf(chemin):
+    """Resout le chemin reel d'un fichier du cache HuggingFace.
+
+    Sur Windows sans mode developpeur, hfhub cree des symlinks qui echouent.
+    Le fichier dans snapshots/ n'existe pas reellement. Le blob reel est dans
+    le dossier blobs/ du meme modele. Cette fonction le retrouve.
+    """
+    import os
+    chemin = pathlib.Path(chemin)
+
+    # Si le fichier est accessible, pas besoin de resolution
+    try:
+        with open(str(chemin), "rb") as f:
+            f.read(1)
+        return chemin
+    except (PermissionError, FileNotFoundError, OSError):
+        pass
+
+    # Remonter jusqu'au dossier snapshots/
+    parts = chemin.parts
+    for i, part in enumerate(parts):
+        if part == "snapshots":
+            model_dir = pathlib.Path(*parts[:i])
+            break
+    else:
+        raise FileNotFoundError(
+            "Impossible de trouver le dossier du modele HF pour: %s" % chemin)
+
+    blobs_dir = model_dir / "blobs"
+    if not blobs_dir.exists():
+        raise FileNotFoundError("Dossier blobs introuvable: %s" % blobs_dir)
+
+    # Chercher le pointer file qui reference le blob
+    # Les fichiers pointer HF contiennent juste le hash sha256
+    pointer_path = chemin
+    if pointer_path.exists():
+        try:
+            content = pointer_path.read_text(encoding="utf-8").strip()
+            # Si c'est un hash (64 chars hex), le blob est blobs/<hash>
+            if len(content) == 64:
+                blob_candidate = blobs_dir / content
+                if blob_candidate.exists():
+                    print("  [Windows] Utilisation du blob via pointer: %s"
+                          % blob_candidate)
+                    return blob_candidate
+        except Exception:
+            pass
+
+    # Fallback: prendre le plus gros blob (= le checkpoint)
+    blobs = list(blobs_dir.iterdir())
+    if not blobs:
+        raise FileNotFoundError("Aucun blob dans: %s" % blobs_dir)
+
+    biggest = max(blobs, key=lambda p: p.stat().st_size)
+    size_mb = biggest.stat().st_size / 1e6
+    print("  [Windows] Symlink casse, utilisation directe du blob (%.0f Mo)"
+          % size_mb)
+    return biggest
+
+
 # Module stubs pour charger le checkpoint pickle
 # ---------------------------------------------------------------------------
 
@@ -417,30 +480,13 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
     else:
         # Installer les stubs pour le unpickle du checkpoint MAESTRO
         _install_maestro_stubs()
-        # Charger avec retry (Windows: antivirus/HF cache peuvent verrouiller)
+        # Resoudre le chemin reel (Windows: symlinks HF cache casses)
+        chemin_reel = _resoudre_chemin_hf(chemin)
         import io
-        import time as _time
-        last_err = None
-        for _attempt in range(5):
-            try:
-                with open(str(chemin), "rb") as f:
-                    buffer = io.BytesIO(f.read())
-                checkpoint = torch.load(buffer, map_location=device,
-                                        weights_only=False)
-                last_err = None
-                break
-            except PermissionError as e:
-                last_err = e
-                wait = 2 ** _attempt  # 1, 2, 4, 8, 16 secondes
-                print("  [ATTENTION] Fichier verrouille, nouvelle tentative "
-                      "dans %ds (%d/5)..." % (wait, _attempt + 1))
-                _time.sleep(wait)
-        if last_err is not None:
-            raise PermissionError(
-                "Impossible d'ouvrir le checkpoint apres 5 tentatives: %s\n"
-                "Fermez les autres applications utilisant ce fichier "
-                "(antivirus, autre session R/Python)." % str(chemin)
-            ) from last_err
+        with open(str(chemin_reel), "rb") as f:
+            buffer = io.BytesIO(f.read())
+        checkpoint = torch.load(buffer, map_location=device,
+                                weights_only=False)
 
         # Extraire le state_dict du checkpoint PyTorch Lightning
         if isinstance(checkpoint, dict):
