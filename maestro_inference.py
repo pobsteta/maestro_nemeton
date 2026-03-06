@@ -320,7 +320,7 @@ def _resoudre_chemin_hf(chemin):
     le dossier blobs/ du meme modele. Cette fonction le retrouve.
     """
     import os
-    chemin = pathlib.Path(chemin)
+    chemin = Path(chemin)
 
     # Si le fichier est accessible, pas besoin de resolution
     try:
@@ -334,7 +334,7 @@ def _resoudre_chemin_hf(chemin):
     parts = chemin.parts
     for i, part in enumerate(parts):
         if part == "snapshots":
-            model_dir = pathlib.Path(*parts[:i])
+            model_dir = Path(*parts[:i])
             break
     else:
         raise FileNotFoundError(
