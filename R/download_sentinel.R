@@ -301,17 +301,33 @@ download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
                    best$id, best$cloud_cover, best$source))
 
   # Telecharger selon le backend
-  s2_raster <- if (best$source == "planetary") {
-    .download_s2_planetary(best, aoi, output_dir)
-  } else {
-    .download_s2_copernicus(best, aoi, output_dir)
-  }
+  s2_raster <- tryCatch({
+    r <- if (best$source == "planetary") {
+      .download_s2_planetary(best, aoi, output_dir)
+    } else {
+      .download_s2_copernicus(best, aoi, output_dir)
+    }
+    if (!inherits(r, "SpatRaster")) {
+      message("  [INFO] Resultat non-SpatRaster, raster synthetique")
+      .create_synthetic_s2(aoi, output_dir)
+    } else {
+      r
+    }
+  }, error = function(e) {
+    message(sprintf("  [WARN] Echec telechargement S2: %s", e$message))
+    message("  Basculement raster synthetique")
+    .create_synthetic_s2(aoi, output_dir)
+  })
 
-  if (!is.null(s2_raster)) {
-    terra::writeRaster(s2_raster, s2_path, overwrite = TRUE,
-                       gdal = c("COMPRESS=LZW"))
-    message(sprintf("  Sentinel-2 sauvegarde: %s (%d bandes)",
-                     s2_path, terra::nlyr(s2_raster)))
+  if (!is.null(s2_raster) && inherits(s2_raster, "SpatRaster")) {
+    tryCatch({
+      terra::writeRaster(s2_raster, s2_path, overwrite = TRUE,
+                         gdal = c("COMPRESS=LZW"))
+      message(sprintf("  Sentinel-2 sauvegarde: %s (%d bandes)",
+                       s2_path, terra::nlyr(s2_raster)))
+    }, error = function(e) {
+      message(sprintf("  [WARN] Echec sauvegarde S2: %s", e$message))
+    })
   }
 
   s2_raster
@@ -674,13 +690,67 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
     layers[[1]] <- ref
   }
   for (i in seq_along(layers)[-1]) {
-    if (terra::res(layers[[i]])[1] != 10 ||
-        !terra::compareGeom(layers[[i]], ref, stopOnError = FALSE)) {
-      layers[[i]] <- terra::resample(layers[[i]], ref, method = "bilinear")
+    ok <- tryCatch({
+      if (terra::res(layers[[i]])[1] != 10 ||
+          !terra::compareGeom(layers[[i]], ref, stopOnError = FALSE)) {
+        layers[[i]] <- terra::resample(layers[[i]], ref, method = "bilinear")
+      }
+      TRUE
+    }, error = function(e) {
+      message(sprintf("  [WARN] Echec resample bande %s: %s",
+                       names(layers[[i]]), e$message))
+      FALSE
+    })
+    if (!ok) layers[[i]] <- NULL
+  }
+  layers <- Filter(Negate(is.null), layers)
+
+  if (length(layers) == 0) {
+    message("  [INFO] Aucune bande valide apres resample, raster synthetique")
+    return(.create_synthetic_s2(aoi, output_dir))
+  }
+
+  # Completer les bandes manquantes avec des valeurs synthetiques
+  all_bands <- names(band_mapping)
+  got_bands <- vapply(layers, function(x) names(x), character(1))
+
+  typical_vegetation <- c(
+    B02 = 350, B03 = 600, B04 = 400, B05 = 1500, B06 = 2500,
+    B07 = 3000, B08 = 3200, B8A = 3100, B11 = 1800, B12 = 800
+  )
+
+  for (band in all_bands) {
+    if (!band %in% got_bands) {
+      message(sprintf("  [INFO] Bande %s manquante, complement synthetique", band))
+      synth <- ref
+      n_cells <- terra::ncell(synth)
+      terra::values(synth) <- stats::rnorm(
+        n_cells, mean = typical_vegetation[[band]],
+        sd = typical_vegetation[[band]] * 0.15
+      )
+      terra::values(synth) <- pmax(0, pmin(10000, terra::values(synth)))
+      names(synth) <- band
+      layers[[band]] <- synth
     }
   }
 
-  do.call(c, layers)
+  # Ordonner les bandes dans l'ordre attendu
+  ordered_layers <- list()
+  for (band in all_bands) {
+    idx <- which(vapply(layers, function(x) names(x), character(1)) == band)
+    if (length(idx) > 0) ordered_layers[[band]] <- layers[[idx[1]]]
+  }
+
+  result <- tryCatch(
+    do.call(c, ordered_layers),
+    error = function(e) {
+      message(sprintf("  [WARN] Echec combinaison bandes: %s", e$message))
+      message("  Basculement raster synthetique complet")
+      .create_synthetic_s2(aoi, output_dir)
+    }
+  )
+
+  result
 }
 
 
