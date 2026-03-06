@@ -82,7 +82,7 @@ configurer_python <- function(envname = CONDA_ENV) {
   message("Environnement conda configure: ", envname)
 
   # Verifier les modules disponibles
-  modules <- c("torch", "numpy", "safetensors")
+  modules <- c("torch", "numpy", "safetensors", "tifffile", "PIL")
   ok <- TRUE
   for (mod in modules) {
     avail <- py_module_available(mod)
@@ -93,7 +93,7 @@ configurer_python <- function(envname = CONDA_ENV) {
   if (!ok) {
     stop("Modules Python manquants. Installez-les dans l'env '", envname, "':\n",
          "  conda activate ", envname, "\n",
-         "  pip install torch numpy safetensors")
+         "  pip install torch numpy safetensors tifffile Pillow")
   }
 
   message("  Python configure.")
