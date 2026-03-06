@@ -350,8 +350,7 @@ def _install_maestro_stubs():
 # Chargement du modele
 # ---------------------------------------------------------------------------
 
-def charger_modele(chemin_poids, n_classes=13, device="cpu",
-                   modalites=None):
+def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
     """
     Charge le modele MAESTRO avec les poids pre-entraines.
 
@@ -365,6 +364,7 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu",
     Returns:
         Modele PyTorch en mode evaluation
     """
+    modalites = kwargs.get("modalites", None)
     chemin = Path(chemin_poids)
     device = torch.device(device)
 

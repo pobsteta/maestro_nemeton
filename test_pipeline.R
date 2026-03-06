@@ -19,7 +19,12 @@ configurer_python()
 
 # --- Test 2: Charger le modele via Python ---
 message("\n=== TEST 2: Chargement du modele MAESTRO ===")
-py_path <- python_module_path()
+# En mode dev, utiliser inst/python/ local ; sinon le package installe
+py_path <- if (file.exists("inst/python/maestro_inference.py")) {
+  normalizePath("inst/python")
+} else {
+  python_module_path()
+}
 maestro_py <- reticulate::import_from_path("maestro_inference", path = py_path)
 np <- reticulate::import("numpy")
 
