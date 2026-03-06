@@ -772,8 +772,8 @@ if __name__ == "__main__":
                         help="Chemin vers le checkpoint pre-entraine (.ckpt)")
     parser.add_argument("--data_dir", required=True,
                         help="Dossier TreeSatAI")
-    parser.add_argument("--output", default="finetuned_maestro.pt",
-                        help="Chemin de sortie [default: finetuned_maestro.pt]")
+    parser.add_argument("--output", default="maestro_8classes_treesatai.pt",
+                        help="Chemin de sortie [default: maestro_8classes_treesatai.pt]")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_encoder", type=float, default=1e-5)

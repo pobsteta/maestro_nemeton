@@ -14,7 +14,7 @@
 #   Rscript finetune_cli.R --data_dir data/TreeSatAI --unfreeze --gpu
 #
 #   # 4. Utiliser le modele fine-tune dans le pipeline
-#   Rscript maestro_cli.R --aoi data/aoi.gpkg --model outputs/finetuned_maestro.pt
+#   Rscript maestro_cli.R --aoi data/aoi.gpkg --model outputs/maestro_8classes_treesatai.pt
 # =============================================================================
 
 if (!requireNamespace("optparse", quietly = TRUE)) {
@@ -38,7 +38,7 @@ option_list <- list(
   make_option(c("--checkpoint"), type = "character", default = NULL,
               help = "Checkpoint pre-entraine (NULL = telecharger depuis HF)"),
   make_option(c("-o", "--output"), type = "character",
-              default = "outputs/finetuned_maestro.pt",
+              default = "outputs/maestro_8classes_treesatai.pt",
               help = "Chemin de sortie du modele fine-tune [default: %default]"),
   make_option(c("--epochs"), type = "integer", default = 30L,
               help = "Nombre d'epoques [default: %default]"),

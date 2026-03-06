@@ -147,7 +147,7 @@ download_treesatai_hf <- function(output_dir = "data/TreeSatAI-TS") {
 #' @param data_dir Chemin vers le dossier TreeSatAI (structure attendue :
 #'   `aerial/train/<classe>/*.tif`)
 #' @param output_path Chemin de sortie pour le checkpoint fine-tune
-#'   (defaut: `"outputs/finetuned_maestro.pt"`)
+#'   (defaut: `"outputs/maestro_8classes_treesatai.pt"`)
 #' @param epochs Nombre d'epoques d'entrainement (defaut: 30)
 #' @param lr Learning rate pour la tete de classification (defaut: 1e-3)
 #' @param lr_encoder Learning rate pour les encodeurs si non geles (defaut: 1e-5)
@@ -172,16 +172,16 @@ download_treesatai_hf <- function(output_dir = "data/TreeSatAI-TS") {
 #' result <- finetune_maestro(
 #'   checkpoint_path = fichiers_modele$weights,
 #'   data_dir = "data/TreeSatAI",
-#'   output_path = "outputs/finetuned_maestro.pt",
+#'   output_path = "outputs/maestro_8classes_treesatai.pt",
 #'   epochs = 30, freeze_encoder = TRUE
 #' )
 #'
 #' # Utiliser le modele fine-tune dans le pipeline
 #' maestro_pipeline("data/aoi.gpkg",
-#'                   model_id = "outputs/finetuned_maestro.pt")
+#'                   model_id = "outputs/maestro_8classes_treesatai.pt")
 #' }
 finetune_maestro <- function(checkpoint_path, data_dir,
-                               output_path = "outputs/finetuned_maestro.pt",
+                               output_path = "outputs/maestro_8classes_treesatai.pt",
                                epochs = 30L, lr = 1e-3, lr_encoder = 1e-5,
                                batch_size = 16L, freeze_encoder = TRUE,
                                modalities = c("aerial"),
