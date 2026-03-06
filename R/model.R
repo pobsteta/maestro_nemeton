@@ -30,6 +30,62 @@ find_checkpoint_name <- function(hf_repo) {
   ckpt_files[1]
 }
 
+#' Reparer un symlink casse du cache HuggingFace (Windows)
+#'
+#' Sur Windows sans privileges developpeur, hfhub ne peut pas creer de
+#' symlinks. Le fichier retourne par hub_download() pointe vers un snapshot
+#' inexistant. Cette fonction detecte ce cas et copie le blob reel a la
+#' place du symlink casse.
+#'
+#' @param chemin Chemin retourne par `hfhub::hub_download()`
+#' @return Chemin valide (le meme si OK, ou apres copie du blob)
+#' @keywords internal
+reparer_symlink_hf <- function(chemin) {
+  if (file.exists(chemin)) return(chemin)
+
+  # Le chemin est sous .../snapshots/<hash>/...
+  # Le blob correspondant est sous .../blobs/<sha256>
+  # On cherche dans le dossier blobs le fichier le plus gros (= le checkpoint)
+  cache_root <- chemin
+  while (!grepl("snapshots$", basename(dirname(cache_root))) &&
+         nchar(cache_root) > 3) {
+    cache_root <- dirname(cache_root)
+  }
+  model_dir <- dirname(dirname(cache_root))  # remonte au-dessus de snapshots/
+  blobs_dir <- file.path(model_dir, "blobs")
+
+  if (!dir.exists(blobs_dir)) {
+    warning("Dossier blobs introuvable: ", blobs_dir)
+    return(chemin)
+  }
+
+  blobs <- list.files(blobs_dir, full.names = TRUE)
+  if (length(blobs) == 0) {
+    warning("Aucun blob dans: ", blobs_dir)
+    return(chemin)
+  }
+
+  # Prendre le plus gros blob (c'est le checkpoint)
+  sizes <- file.size(blobs)
+  blob_path <- blobs[which.max(sizes)]
+  blob_size <- max(sizes, na.rm = TRUE)
+
+  message(sprintf("  [Windows] Symlink casse, copie du blob (%.0f Mo)...",
+                  blob_size / 1e6))
+
+  # Creer les dossiers parents si necessaire
+  dir.create(dirname(chemin), recursive = TRUE, showWarnings = FALSE)
+  file.copy(blob_path, chemin, overwrite = TRUE)
+
+  if (file.exists(chemin)) {
+    message("  [Windows] Checkpoint copie avec succes")
+  } else {
+    warning("Impossible de copier le blob vers: ", chemin)
+  }
+
+  chemin
+}
+
 #' Telecharger le modele MAESTRO depuis Hugging Face
 #'
 #' Utilise le package R [hfhub](https://cran.r-project.org/package=hfhub)
@@ -67,7 +123,8 @@ telecharger_modele <- function(repo_id = "IGNF/MAESTRO_FLAIR-HUB_base",
   if (!is.null(ckpt_name)) {
     message(sprintf("  Telechargement via hfhub : %s", ckpt_name))
     tryCatch({
-      fichiers_modele$weights <- hfhub::hub_download(repo_id, ckpt_name)
+      chemin_poids <- hfhub::hub_download(repo_id, ckpt_name)
+      fichiers_modele$weights <- reparer_symlink_hf(chemin_poids)
       message(sprintf("  Poids : %s", fichiers_modele$weights))
     }, error = function(e) message("  hfhub echoue: ", e$message))
   }
@@ -78,7 +135,8 @@ telecharger_modele <- function(repo_id = "IGNF/MAESTRO_FLAIR-HUB_base",
                      "model.pt", "checkpoint.pth")
     for (nom in noms_poids) {
       tryCatch({
-        fichiers_modele$weights <- hfhub::hub_download(repo_id, nom)
+        chemin_poids <- hfhub::hub_download(repo_id, nom)
+        fichiers_modele$weights <- reparer_symlink_hf(chemin_poids)
         message(sprintf("  Poids : %s", fichiers_modele$weights))
         break
       }, error = function(e) NULL)
