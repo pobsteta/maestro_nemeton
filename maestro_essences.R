@@ -797,6 +797,33 @@ configurer_python <- function(envname = "maestro") {
   # Eviter le conflit OpenMP sur Windows (torch + numpy livrent chacun libiomp5md.dll)
   Sys.setenv(KMP_DUPLICATE_LIB_OK = "TRUE")
 
+  # Auto-detection de conda (Miniforge, Miniconda, Anaconda) si reticulate
+  # ne le trouve pas tout seul
+  if (is.null(tryCatch(conda_binary(), error = function(e) NULL))) {
+    conda_candidates <- if (.Platform$OS.type == "windows") {
+      home <- Sys.getenv("USERPROFILE", Sys.getenv("HOME"))
+      c(file.path(home, "miniforge3", "condabin", "conda.bat"),
+        file.path(home, "mambaforge", "condabin", "conda.bat"),
+        file.path(home, "miniconda3", "condabin", "conda.bat"),
+        file.path(home, "anaconda3", "condabin", "conda.bat"),
+        file.path(Sys.getenv("LOCALAPPDATA"), "miniforge3", "condabin", "conda.bat"),
+        file.path(Sys.getenv("PROGRAMDATA"), "miniforge3", "condabin", "conda.bat"))
+    } else {
+      home <- Sys.getenv("HOME")
+      c(file.path(home, "miniforge3", "bin", "conda"),
+        file.path(home, "mambaforge", "bin", "conda"),
+        file.path(home, "miniconda3", "bin", "conda"),
+        file.path(home, "anaconda3", "bin", "conda"),
+        "/opt/miniforge3/bin/conda",
+        "/opt/miniconda3/bin/conda")
+    }
+    found <- Filter(file.exists, conda_candidates)
+    if (length(found) > 0) {
+      Sys.setenv(RETICULATE_CONDA = found[[1]])
+      message("Conda detecte automatiquement: ", found[[1]])
+    }
+  }
+
   use_condaenv(envname, required = TRUE)
   message("Environnement conda configure: ", envname)
 
