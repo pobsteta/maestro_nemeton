@@ -232,6 +232,124 @@ search_s1_stac <- function(bbox, start_date, end_date,
   list(scenes = result, items = items_signed)
 }
 
+# --- Periodes temporelles ---
+
+#' Construire les periodes de recherche multi-annuelles
+#'
+#' A partir d'un vecteur d'annees et d'une saison, genere les intervalles
+#' de dates a interroger via STAC.
+#'
+#' @param annees_sentinel Vecteur d'annees (ex: 2021:2024)
+#' @param saison Saison cible : "ete" (juin-sept), "printemps" (mars-mai),
+#'   "automne" (sept-nov), "annee" (jan-dec), ou vecteur de 2 mois c(debut, fin)
+#' @return data.frame avec colonnes `start_date` et `end_date`
+#' @export
+build_date_ranges <- function(annees_sentinel, saison = "ete") {
+  # Saisons predefinies (mois debut, mois fin)
+  saisons <- list(
+    ete       = c(6, 9),
+    printemps = c(3, 5),
+    automne   = c(9, 11),
+    annee     = c(1, 12)
+  )
+
+  if (is.character(saison) && saison %in% names(saisons)) {
+    mois <- saisons[[saison]]
+  } else if (is.numeric(saison) && length(saison) == 2) {
+    mois <- saison
+  } else {
+    stop("saison doit etre 'ete', 'printemps', 'automne', 'annee', ",
+         "ou un vecteur de 2 mois c(debut, fin)")
+  }
+
+  data.frame(
+    start_date = sprintf("%d-%02d-01", annees_sentinel, mois[1]),
+    end_date   = sprintf("%d-%02d-%02d", annees_sentinel, mois[2],
+                          ifelse(mois[2] %in% c(4, 6, 9, 11), 30, 31)),
+    annee      = annees_sentinel,
+    stringsAsFactors = FALSE
+  )
+}
+
+# --- Telechargement S2 mono-scene (interne) ---
+
+#' Telecharger une scene Sentinel-2 unique
+#'
+#' @param sel_feature Feature STAC signe
+#' @param aoi_vect SpatVector WGS84
+#' @param template SpatRaster template 10m Lambert-93
+#' @return SpatRaster 10 bandes, ou NULL
+#' @noRd
+.download_s2_scene <- function(sel_feature, aoi_vect, template) {
+  conf <- .stac_config()
+  layers <- list()
+
+  for (band in conf$s2_bands) {
+    url <- sel_feature$assets[[band]]$href
+    if (is.null(url)) next
+
+    r <- .read_remote_cog(url, aoi_vect)
+    if (!is.null(r)) {
+      names(r) <- band
+      layers[[band]] <- r
+    }
+  }
+
+  if (length(layers) == 0) return(NULL)
+
+  # Reprojeter et reechantillonner a 10m Lambert-93
+  for (i in seq_along(layers)) {
+    band_name <- names(layers[[i]])
+    layers[[i]] <- tryCatch({
+      r <- terra::project(layers[[i]], "EPSG:2154")
+      r <- terra::resample(r, template, method = "bilinear")
+      names(r) <- band_name
+      r
+    }, error = function(e) NULL)
+  }
+  layers <- Filter(Negate(is.null), layers)
+
+  if (length(layers) == 0) return(NULL)
+
+  tryCatch(do.call(c, layers), error = function(e) NULL)
+}
+
+# --- Composite median ---
+
+#' Calculer un composite median a partir de plusieurs rasters
+#'
+#' Calcule la mediane pixel par pixel pour chaque bande a partir
+#' d'une liste de rasters multi-bandes. La mediane est robuste aux
+#' valeurs aberrantes (nuages residuels, secheresse ponctuelle).
+#'
+#' @param rasters Liste de SpatRaster (meme nombre de bandes et emprise)
+#' @return SpatRaster composite median
+#' @export
+calculer_composite_median <- function(rasters) {
+  if (length(rasters) == 1) return(rasters[[1]])
+
+  message(sprintf("  Calcul composite median a partir de %d scenes...",
+                   length(rasters)))
+
+  # Empiler toutes les scenes dans un SpatRasterDataset par bande
+  n_bandes <- terra::nlyr(rasters[[1]])
+  band_names <- names(rasters[[1]])
+  composite_layers <- list()
+
+  for (b in seq_len(n_bandes)) {
+    # Extraire la bande b de chaque scene
+    band_stack <- terra::rast(lapply(rasters, function(r) r[[b]]))
+    # Mediane pixel-wise
+    composite_layers[[b]] <- terra::app(band_stack, fun = "median",
+                                         na.rm = TRUE)
+    names(composite_layers[[b]]) <- band_names[b]
+  }
+
+  composite <- do.call(c, composite_layers)
+  message(sprintf("  Composite median: %d bandes", terra::nlyr(composite)))
+  composite
+}
+
 # --- Telechargement S2 ---
 
 #' Telecharger une image Sentinel-2 pour une AOI
@@ -240,15 +358,38 @@ search_s1_stac <- function(bbox, start_date, end_date,
 #' Microsoft Planetary Computer (COG en acces libre). Utilise rstac
 #' pour la recherche et le signing automatique des URLs.
 #'
+#' Supporte le mode multitemporel : en fournissant `annees_sentinel`,
+#' plusieurs scenes sont telechargees sur plusieurs annees/saisons et
+#' combinees en un composite median pixel par pixel. Cela permet de
+#' gommer les annees seches et de reduire l'impact des nuages.
+#'
 #' @param aoi sf object en Lambert-93
 #' @param output_dir Repertoire de sortie
-#' @param date_cible Date cible (format "YYYY-MM-DD", optionnel)
+#' @param date_cible Date cible (format "YYYY-MM-DD", optionnel).
+#'   Ignore si `annees_sentinel` est fourni.
+#' @param annees_sentinel Vecteur d'annees pour le composite multi-annuel
+#'   (ex: `2021:2024`). Si NULL, utilise le comportement mono-date.
+#' @param saison Saison cible pour le composite : "ete" (defaut),
+#'   "printemps", "automne", "annee", ou vecteur de 2 mois c(debut, fin)
+#' @param max_scenes_par_annee Nombre max de scenes a retenir par annee
+#'   pour le composite (defaut: 3, les moins nuageuses)
 #' @return SpatRaster avec les 10 bandes S2, ou NULL
 #' @export
-download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
+download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL,
+                                 annees_sentinel = NULL, saison = "ete",
+                                 max_scenes_par_annee = 3L) {
   message("=== Telechargement Sentinel-2 pour l'AOI ===")
 
-  s2_path <- file.path(output_dir, "sentinel2.tif")
+  # Determiner le nom du fichier de sortie
+  if (!is.null(annees_sentinel)) {
+    s2_path <- file.path(output_dir, sprintf("sentinel2_composite_%s_%s.tif",
+                                               paste(range(annees_sentinel),
+                                                     collapse = "-"),
+                                               saison))
+  } else {
+    s2_path <- file.path(output_dir, "sentinel2.tif")
+  }
+
   if (file.exists(s2_path)) {
     message("  Cache: ", s2_path)
     return(terra::rast(s2_path))
@@ -256,131 +397,133 @@ download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
 
   aoi_wgs84 <- sf::st_transform(aoi, 4326)
   bbox_wgs84 <- as.numeric(sf::st_bbox(aoi_wgs84))
-
-  # Determiner la periode de recherche
-  if (is.null(date_cible)) {
-    annee <- format(Sys.Date(), "%Y")
-    start_date <- paste0(annee, "-06-01")
-    end_date <- paste0(annee, "-09-30")
-  } else {
-    d <- as.Date(date_cible)
-    start_date <- as.character(d - 30)
-    end_date <- as.character(d + 30)
-  }
-
-  search_result <- search_s2_stac(bbox_wgs84, start_date, end_date,
-                                    max_cloud = 20)
-
-  if (is.null(search_result)) {
-    message("  Aucune scene S2, essai sur l'annee entiere...")
-    annee <- if (!is.null(date_cible)) format(as.Date(date_cible), "%Y") else
-      format(Sys.Date(), "%Y")
-    search_result <- search_s2_stac(bbox_wgs84,
-                                      paste0(annee, "-01-01"),
-                                      paste0(annee, "-12-31"),
-                                      max_cloud = 30)
-  }
-
-  if (is.null(search_result)) {
-    warning("Aucune scene Sentinel-2 trouvee pour cette AOI")
-    return(NULL)
-  }
-
-  scenes <- search_result$scenes
-  items_signed <- search_result$items
-  best <- scenes[1, ]
-  message(sprintf("  Scene selectionnee: %s (nuages: %.0f%%)",
-                   best$id, best$cloud_cover))
-
-  # Trouver le feature signe correspondant
-  sel_feature <- NULL
-  for (feat in items_signed$features) {
-    if (feat$id == best$id) {
-      sel_feature <- feat
-      break
-    }
-  }
-
-  if (is.null(sel_feature)) {
-    warning("Feature signe non trouve pour la scene selectionnee")
-    return(NULL)
-  }
-
-  # Telecharger chaque bande via COG
-  conf <- .stac_config()
   aoi_vect <- terra::vect(aoi_wgs84)
-  layers <- list()
 
-  for (band in conf$s2_bands) {
-    url <- sel_feature$assets[[band]]$href
-    if (is.null(url)) {
-      message(sprintf("  [WARN] Asset %s non disponible", band))
-      next
-    }
-
-    message(sprintf("  Telechargement bande %s...", band))
-    r <- .read_remote_cog(url, aoi_vect)
-
-    if (!is.null(r)) {
-      names(r) <- band
-      layers[[band]] <- r
-      message(sprintf("  %s OK", band))
-    } else {
-      message(sprintf("  [WARN] Echec telechargement bande %s", band))
-    }
-  }
-
-  if (length(layers) == 0) {
-    warning("Aucune bande S2 telechargee")
-    return(NULL)
-  }
-
-  message(sprintf("  %d/%d bandes S2 telechargees", length(layers),
-                   length(conf$s2_bands)))
-
-  if (length(layers) < length(conf$s2_bands)) {
-    missing <- setdiff(conf$s2_bands, names(layers))
-    warning(sprintf("Bandes manquantes: %s", paste(missing, collapse = ", ")))
-  }
-
-  # Reprojeter en Lambert-93 et reechantillonner a 10m
+  # Template 10m en Lambert-93
   bbox_l93 <- sf::st_bbox(aoi)
   ext_aoi <- terra::ext(bbox_l93["xmin"], bbox_l93["xmax"],
                          bbox_l93["ymin"], bbox_l93["ymax"])
-
-  # Template 10m en Lambert-93
   template <- terra::rast(ext = ext_aoi, res = 10, crs = "EPSG:2154")
 
-  for (i in seq_along(layers)) {
-    band_name <- names(layers[[i]])
-    layers[[i]] <- tryCatch({
-      r <- terra::project(layers[[i]], "EPSG:2154")
-      r <- terra::resample(r, template, method = "bilinear")
-      names(r) <- band_name
-      r
-    }, error = function(e) {
-      message(sprintf("  [WARN] Echec reprojection %s: %s", band_name,
-                       e$message))
-      NULL
-    })
-  }
-  layers <- Filter(Negate(is.null), layers)
+  # ---- Mode multitemporel ----
+  if (!is.null(annees_sentinel)) {
+    message(sprintf("  Mode multitemporel: %d annees, saison = %s",
+                     length(annees_sentinel),
+                     if (is.character(saison)) saison else
+                       paste(saison, collapse = "-")))
 
-  if (length(layers) == 0) {
-    warning("Aucune bande S2 valide apres reprojection")
-    return(NULL)
-  }
+    date_ranges <- build_date_ranges(annees_sentinel, saison)
+    all_scenes <- list()
 
-  # Combiner les bandes dans l'ordre
-  s2_raster <- tryCatch(
-    do.call(c, layers),
-    error = function(e) {
-      message(sprintf("  [WARN] Echec combinaison bandes: %s", e$message))
-      NULL
+    for (i in seq_len(nrow(date_ranges))) {
+      yr <- date_ranges$annee[i]
+      message(sprintf("  --- Annee %d ---", yr))
+
+      search_result <- search_s2_stac(bbox_wgs84,
+                                        date_ranges$start_date[i],
+                                        date_ranges$end_date[i],
+                                        max_cloud = 30)
+
+      if (is.null(search_result)) {
+        message(sprintf("    Aucune scene S2 pour %d, essai annee entiere...",
+                         yr))
+        search_result <- search_s2_stac(bbox_wgs84,
+                                          paste0(yr, "-01-01"),
+                                          paste0(yr, "-12-31"),
+                                          max_cloud = 30)
+      }
+
+      if (is.null(search_result)) {
+        message(sprintf("    Aucune scene S2 trouvee pour %d", yr))
+        next
+      }
+
+      scenes <- search_result$scenes
+      items_signed <- search_result$items
+      n_sel <- min(nrow(scenes), max_scenes_par_annee)
+
+      for (j in seq_len(n_sel)) {
+        sc <- scenes[j, ]
+        message(sprintf("    Scene %d/%d: %s (nuages: %.0f%%)",
+                         j, n_sel, sc$id, sc$cloud_cover))
+
+        sel_feature <- NULL
+        for (feat in items_signed$features) {
+          if (feat$id == sc$id) { sel_feature <- feat; break }
+        }
+        if (is.null(sel_feature)) next
+
+        r <- .download_s2_scene(sel_feature, aoi_vect, template)
+        if (!is.null(r)) {
+          all_scenes[[length(all_scenes) + 1]] <- r
+          message(sprintf("    -> OK (%d bandes)", terra::nlyr(r)))
+        }
+      }
     }
-  )
 
-  if (is.null(s2_raster)) return(NULL)
+    if (length(all_scenes) == 0) {
+      warning("Aucune scene Sentinel-2 telechargee sur la periode multi-annuelle")
+      return(NULL)
+    }
+
+    message(sprintf("  Total: %d scenes S2 telechargees", length(all_scenes)))
+    s2_raster <- calculer_composite_median(all_scenes)
+
+  } else {
+    # ---- Mode mono-date (comportement original) ----
+    if (is.null(date_cible)) {
+      annee <- format(Sys.Date(), "%Y")
+      start_date <- paste0(annee, "-06-01")
+      end_date <- paste0(annee, "-09-30")
+    } else {
+      d <- as.Date(date_cible)
+      start_date <- as.character(d - 30)
+      end_date <- as.character(d + 30)
+    }
+
+    search_result <- search_s2_stac(bbox_wgs84, start_date, end_date,
+                                      max_cloud = 20)
+
+    if (is.null(search_result)) {
+      message("  Aucune scene S2, essai sur l'annee entiere...")
+      annee <- if (!is.null(date_cible)) format(as.Date(date_cible), "%Y") else
+        format(Sys.Date(), "%Y")
+      search_result <- search_s2_stac(bbox_wgs84,
+                                        paste0(annee, "-01-01"),
+                                        paste0(annee, "-12-31"),
+                                        max_cloud = 30)
+    }
+
+    if (is.null(search_result)) {
+      warning("Aucune scene Sentinel-2 trouvee pour cette AOI")
+      return(NULL)
+    }
+
+    scenes <- search_result$scenes
+    items_signed <- search_result$items
+    best <- scenes[1, ]
+    message(sprintf("  Scene selectionnee: %s (nuages: %.0f%%)",
+                     best$id, best$cloud_cover))
+
+    sel_feature <- NULL
+    for (feat in items_signed$features) {
+      if (feat$id == best$id) { sel_feature <- feat; break }
+    }
+
+    if (is.null(sel_feature)) {
+      warning("Feature signe non trouve pour la scene selectionnee")
+      return(NULL)
+    }
+
+    s2_raster <- .download_s2_scene(sel_feature, aoi_vect, template)
+
+    if (is.null(s2_raster)) {
+      warning("Aucune bande S2 telechargee")
+      return(NULL)
+    }
+
+    message(sprintf("  %d bandes S2 telechargees", terra::nlyr(s2_raster)))
+  }
 
   # Sauvegarder
   tryCatch({
@@ -403,17 +546,39 @@ download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
 #' (collection sentinel-1-rtc, deja corrige du terrain).
 #' Les valeurs lineaires (gamma0) sont converties en dB : 10 * log10(val).
 #'
+#' Supporte le mode multitemporel : en fournissant `annees_sentinel`,
+#' plusieurs scenes sont telechargees et combinees en composite median.
+#'
 #' @param aoi sf object en Lambert-93
 #' @param output_dir Repertoire de sortie
-#' @param date_cible Date cible (optionnel)
+#' @param date_cible Date cible (optionnel). Ignore si `annees_sentinel`
+#'   est fourni.
+#' @param annees_sentinel Vecteur d'annees pour le composite multi-annuel
+#'   (ex: `2021:2024`). Si NULL, utilise le comportement mono-date.
+#' @param saison Saison cible pour le composite : "ete" (defaut),
+#'   "printemps", "automne", "annee", ou vecteur de 2 mois
+#' @param max_scenes_par_annee Nombre max de scenes par annee/orbite
+#'   pour le composite (defaut: 3)
 #' @return Liste avec `s1_asc` et `s1_des` (SpatRaster 2 bandes VV+VH chacun),
 #'   ou NULL si non disponible
 #' @export
-download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
+download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL,
+                                 annees_sentinel = NULL, saison = "ete",
+                                 max_scenes_par_annee = 3L) {
   message("=== Telechargement Sentinel-1 pour l'AOI ===")
 
-  s1_asc_path <- file.path(output_dir, "sentinel1_asc.tif")
-  s1_des_path <- file.path(output_dir, "sentinel1_des.tif")
+  # Determiner les noms de fichiers
+  if (!is.null(annees_sentinel)) {
+    suffix <- sprintf("_composite_%s_%s",
+                       paste(range(annees_sentinel), collapse = "-"),
+                       if (is.character(saison)) saison else
+                         paste(saison, collapse = "-"))
+    s1_asc_path <- file.path(output_dir, paste0("sentinel1_asc", suffix, ".tif"))
+    s1_des_path <- file.path(output_dir, paste0("sentinel1_des", suffix, ".tif"))
+  } else {
+    s1_asc_path <- file.path(output_dir, "sentinel1_asc.tif")
+    s1_des_path <- file.path(output_dir, "sentinel1_des.tif")
+  }
 
   if (file.exists(s1_asc_path) && file.exists(s1_des_path)) {
     message("  Cache: S1 ascending + descending")
@@ -426,50 +591,132 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL) {
   aoi_wgs84 <- sf::st_transform(aoi, 4326)
   bbox_wgs84 <- as.numeric(sf::st_bbox(aoi_wgs84))
 
-  if (is.null(date_cible)) {
-    annee <- format(Sys.Date(), "%Y")
-    start_date <- paste0(annee, "-06-01")
-    end_date <- paste0(annee, "-09-30")
-  } else {
-    d <- as.Date(date_cible)
-    start_date <- as.character(d - 30)
-    end_date <- as.character(d + 30)
-  }
-
   result <- list(s1_asc = NULL, s1_des = NULL)
 
-  # --- Ascending ---
-  if (!file.exists(s1_asc_path)) {
-    search_asc <- search_s1_stac(bbox_wgs84, start_date, end_date,
-                                   orbit_direction = "ascending")
-    if (!is.null(search_asc)) {
-      result$s1_asc <- .download_s1_orbit(search_asc, aoi, "ascending")
-      if (!is.null(result$s1_asc)) {
-        terra::writeRaster(result$s1_asc, s1_asc_path, overwrite = TRUE,
-                           gdal = c("COMPRESS=LZW"))
-        message(sprintf("  S1 ascending sauvegarde: %s", s1_asc_path))
-      }
-    }
-  } else {
-    result$s1_asc <- terra::rast(s1_asc_path)
-    message("  Cache: S1 ascending")
-  }
+  # ---- Mode multitemporel ----
+  if (!is.null(annees_sentinel)) {
+    message(sprintf("  Mode multitemporel S1: %d annees, saison = %s",
+                     length(annees_sentinel),
+                     if (is.character(saison)) saison else
+                       paste(saison, collapse = "-")))
 
-  # --- Descending ---
-  if (!file.exists(s1_des_path)) {
-    search_des <- search_s1_stac(bbox_wgs84, start_date, end_date,
-                                   orbit_direction = "descending")
-    if (!is.null(search_des)) {
-      result$s1_des <- .download_s1_orbit(search_des, aoi, "descending")
-      if (!is.null(result$s1_des)) {
-        terra::writeRaster(result$s1_des, s1_des_path, overwrite = TRUE,
-                           gdal = c("COMPRESS=LZW"))
-        message(sprintf("  S1 descending sauvegarde: %s", s1_des_path))
+    date_ranges <- build_date_ranges(annees_sentinel, saison)
+
+    for (orbit in c("ascending", "descending")) {
+      orbit_key <- ifelse(orbit == "ascending", "s1_asc", "s1_des")
+      orbit_path <- ifelse(orbit == "ascending", s1_asc_path, s1_des_path)
+
+      if (file.exists(orbit_path)) {
+        result[[orbit_key]] <- terra::rast(orbit_path)
+        message(sprintf("  Cache: S1 %s", orbit))
+        next
+      }
+
+      all_orbit_scenes <- list()
+
+      for (i in seq_len(nrow(date_ranges))) {
+        yr <- date_ranges$annee[i]
+        message(sprintf("  --- S1 %s, annee %d ---", orbit, yr))
+
+        search_result <- search_s1_stac(bbox_wgs84,
+                                          date_ranges$start_date[i],
+                                          date_ranges$end_date[i],
+                                          orbit_direction = orbit)
+
+        if (is.null(search_result)) {
+          message(sprintf("    Aucun produit S1 %s pour %d, essai annee...",
+                           orbit, yr))
+          search_result <- search_s1_stac(bbox_wgs84,
+                                            paste0(yr, "-01-01"),
+                                            paste0(yr, "-12-31"),
+                                            orbit_direction = orbit)
+        }
+
+        if (is.null(search_result)) {
+          message(sprintf("    Aucun produit S1 %s pour %d", orbit, yr))
+          next
+        }
+
+        scenes <- search_result$scenes
+        n_sel <- min(nrow(scenes), max_scenes_par_annee)
+
+        for (j in seq_len(n_sel)) {
+          sc <- scenes[j, ]
+          message(sprintf("    Scene %d/%d: %s", j, n_sel, sc$id))
+
+          s1_orbit <- .download_s1_orbit(
+            list(scenes = scenes[j, , drop = FALSE],
+                 items = search_result$items),
+            aoi, orbit)
+
+          if (!is.null(s1_orbit)) {
+            all_orbit_scenes[[length(all_orbit_scenes) + 1]] <- s1_orbit
+            message(sprintf("    -> OK (%d bandes)", terra::nlyr(s1_orbit)))
+          }
+        }
+      }
+
+      if (length(all_orbit_scenes) > 0) {
+        message(sprintf("  Total S1 %s: %d scenes", orbit,
+                         length(all_orbit_scenes)))
+        result[[orbit_key]] <- calculer_composite_median(all_orbit_scenes)
+        tryCatch({
+          terra::writeRaster(result[[orbit_key]], orbit_path, overwrite = TRUE,
+                             gdal = c("COMPRESS=LZW"))
+          message(sprintf("  S1 %s composite sauvegarde: %s", orbit,
+                           orbit_path))
+        }, error = function(e) {
+          message(sprintf("  [WARN] Echec sauvegarde S1 %s: %s", orbit,
+                           e$message))
+        })
       }
     }
+
   } else {
-    result$s1_des <- terra::rast(s1_des_path)
-    message("  Cache: S1 descending")
+    # ---- Mode mono-date (comportement original) ----
+    if (is.null(date_cible)) {
+      annee <- format(Sys.Date(), "%Y")
+      start_date <- paste0(annee, "-06-01")
+      end_date <- paste0(annee, "-09-30")
+    } else {
+      d <- as.Date(date_cible)
+      start_date <- as.character(d - 30)
+      end_date <- as.character(d + 30)
+    }
+
+    # --- Ascending ---
+    if (!file.exists(s1_asc_path)) {
+      search_asc <- search_s1_stac(bbox_wgs84, start_date, end_date,
+                                     orbit_direction = "ascending")
+      if (!is.null(search_asc)) {
+        result$s1_asc <- .download_s1_orbit(search_asc, aoi, "ascending")
+        if (!is.null(result$s1_asc)) {
+          terra::writeRaster(result$s1_asc, s1_asc_path, overwrite = TRUE,
+                             gdal = c("COMPRESS=LZW"))
+          message(sprintf("  S1 ascending sauvegarde: %s", s1_asc_path))
+        }
+      }
+    } else {
+      result$s1_asc <- terra::rast(s1_asc_path)
+      message("  Cache: S1 ascending")
+    }
+
+    # --- Descending ---
+    if (!file.exists(s1_des_path)) {
+      search_des <- search_s1_stac(bbox_wgs84, start_date, end_date,
+                                     orbit_direction = "descending")
+      if (!is.null(search_des)) {
+        result$s1_des <- .download_s1_orbit(search_des, aoi, "descending")
+        if (!is.null(result$s1_des)) {
+          terra::writeRaster(result$s1_des, s1_des_path, overwrite = TRUE,
+                             gdal = c("COMPRESS=LZW"))
+          message(sprintf("  S1 descending sauvegarde: %s", s1_des_path))
+        }
+      }
+    } else {
+      result$s1_des <- terra::rast(s1_des_path)
+      message("  Cache: S1 descending")
+    }
   }
 
   has_data <- !is.null(result$s1_asc) || !is.null(result$s1_des)

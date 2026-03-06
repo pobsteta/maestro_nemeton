@@ -23,7 +23,14 @@
 #' @param use_s2 Inclure Sentinel-2 (10 bandes) (defaut: FALSE)
 #' @param use_s1 Inclure Sentinel-1 ascending + descending (defaut: FALSE)
 #' @param date_sentinel Date cible pour les images Sentinel (format "YYYY-MM-DD",
-#'   NULL = ete de l'annee en cours)
+#'   NULL = ete de l'annee en cours). Ignore si `annees_sentinel` est fourni.
+#' @param annees_sentinel Vecteur d'annees pour un composite multi-annuel
+#'   (ex: `2021:2024`). Telecharge plusieurs scenes par annee et calcule
+#'   un composite median pixel par pixel, robuste aux nuages et a la secheresse.
+#' @param saison Saison cible pour le composite multitemporel : "ete" (defaut),
+#'   "printemps", "automne", "annee", ou vecteur de 2 mois c(debut, fin)
+#' @param max_scenes_par_annee Nombre max de scenes a retenir par annee
+#'   pour le composite (defaut: 3, les moins nuageuses)
 #' @param gpu Utiliser le GPU CUDA (defaut: FALSE)
 #' @param token Token Hugging Face (optionnel)
 #' @return Liste invisible avec `grille` (sf) et `raster` (SpatRaster)
@@ -39,6 +46,14 @@
 #' # Avec une date cible pour Sentinel
 #' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE,
 #'                   date_sentinel = "2024-07-15")
+#'
+#' # Composite multi-annuel (3 etes, median pixel par pixel)
+#' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE, use_s1 = TRUE,
+#'                   annees_sentinel = 2022:2024, saison = "ete")
+#'
+#' # Composite sur 5 annees, saison complete
+#' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE, use_s1 = TRUE,
+#'                   annees_sentinel = 2020:2024, saison = "annee")
 #' }
 maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               output_dir = "outputs",
@@ -50,14 +65,26 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               use_s2 = FALSE,
                               use_s1 = FALSE,
                               date_sentinel = NULL,
+                              annees_sentinel = NULL,
+                              saison = "ete",
+                              max_scenes_par_annee = 3L,
                               gpu = FALSE,
                               token = NULL) {
   message("========================================================")
   message(" MAESTRO - Reconnaissance des essences forestieres")
   message(" Modele IGNF multi-modal (aerial + DEM + S2 + S1)")
   message(" Donnees ortho + DEM via Geoplateforme IGN (WMS-R)")
-  if (use_s2) message(" + Sentinel-2 (10 bandes, via STAC Copernicus)")
-  if (use_s1) message(" + Sentinel-1 (VV+VH, via STAC Copernicus)")
+  if (use_s2) message(" + Sentinel-2 (10 bandes, via STAC Planetary Computer)")
+  if (use_s1) message(" + Sentinel-1 (VV+VH, via STAC Planetary Computer)")
+  if (!is.null(annees_sentinel)) {
+    saison_label <- if (is.character(saison)) saison else
+      paste(saison, collapse = "-")
+    message(sprintf(" + Mode multitemporel: %d annees (%s-%s), saison = %s",
+                     length(annees_sentinel), min(annees_sentinel),
+                     max(annees_sentinel), saison_label))
+    message(sprintf("   Composite median (max %d scenes/annee)",
+                     max_scenes_par_annee))
+  }
   message("========================================================\n")
 
   # 1. Charger l'AOI
@@ -96,7 +123,11 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
 
   # 5. Sentinel-2 (optionnel)
   if (use_s2) {
-    s2 <- download_s2_for_aoi(aoi, output_dir, date_cible = date_sentinel)
+    s2 <- download_s2_for_aoi(aoi, output_dir,
+                                date_cible = date_sentinel,
+                                annees_sentinel = annees_sentinel,
+                                saison = saison,
+                                max_scenes_par_annee = max_scenes_par_annee)
     if (!is.null(s2)) {
       s2 <- aligner_sentinel(s2, rgbi, target_res = 10)
       modalites$s2 <- s2
@@ -107,7 +138,11 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
 
   # 6. Sentinel-1 (optionnel)
   if (use_s1) {
-    s1 <- download_s1_for_aoi(aoi, output_dir, date_cible = date_sentinel)
+    s1 <- download_s1_for_aoi(aoi, output_dir,
+                                date_cible = date_sentinel,
+                                annees_sentinel = annees_sentinel,
+                                saison = saison,
+                                max_scenes_par_annee = max_scenes_par_annee)
     if (!is.null(s1)) {
       if (!is.null(s1$s1_asc)) {
         s1_asc <- aligner_sentinel(s1$s1_asc, rgbi, target_res = 10)

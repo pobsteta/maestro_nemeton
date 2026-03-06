@@ -35,6 +35,8 @@ export(search_s1_stac)
 export(download_s2_for_aoi)
 export(download_s1_for_aoi)
 export(aligner_sentinel)
+export(build_date_ranges)
+export(calculer_composite_median)
 
 # --- FLAIR (occupation du sol) ---
 export(classes_cosia)
