@@ -13,7 +13,7 @@
 .ign_config$RES_IGN      <- 0.2
 .ign_config$RES_DEM      <- 1.0
 
-#' @importFrom utils read.csv write.csv
+#' @importFrom utils write.csv
 NULL
 
 .onLoad <- function(libname, pkgname) {

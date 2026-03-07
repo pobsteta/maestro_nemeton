@@ -61,13 +61,10 @@ Rscript inst/scripts/maestro_cli.R --aoi data/aoi.gpkg \
 
 ```bash
 # Test complet (500m x 500m, Fontainebleau)
-Rscript inst/scripts/test_pipeline_aoi.R
-
-# Test rapide (200m x 200m)
-Rscript inst/scripts/test_pipeline_aoi.R --petite_zone
+Rscript inst/scripts/test_pipeline.R
 
 # Avec millesime
-Rscript inst/scripts/test_pipeline_aoi.R --millesime 2023
+Rscript inst/scripts/test_pipeline.R --millesime 2023
 ```
 
 ## Pipeline
@@ -121,7 +118,7 @@ maestro_nemeton/
       maestro_inference.py    # Module PyTorch (ViT/MAE)
     scripts/
       maestro_cli.R           # Interface ligne de commande
-      test_pipeline_aoi.R     # Script de test
+      test_pipeline.R         # Script de test
   man/                        # Documentation (generee par roxygen2)
 ```
 

@@ -77,15 +77,14 @@ configurer_python <- function(envname = CONDA_ENV) {
     }
   }
 
-  library(reticulate)
-  use_condaenv(envname, required = TRUE)
+  reticulate::use_condaenv(envname, required = TRUE)
   message("Environnement conda configure: ", envname)
 
   # Verifier les modules disponibles
   modules <- c("torch", "numpy", "safetensors")
   ok <- TRUE
   for (mod in modules) {
-    avail <- py_module_available(mod)
+    avail <- reticulate::py_module_available(mod)
     message(sprintf("  Python %s: %s", mod, ifelse(avail, "OK", "MANQUANT")))
     if (!avail) ok <- FALSE
   }

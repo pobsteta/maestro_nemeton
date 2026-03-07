@@ -13,6 +13,11 @@ resultats/
 # Data (user-provided)
 data/aoi.gpkg
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # OS
 .DS_Store
 Thumbs.db
