@@ -633,6 +633,7 @@ def finetuner(checkpoint_path, data_dir, output_path,
         train_correct = 0
         train_total = 0
 
+        n_batches = len(train_loader)
         for batch_idx, (data, labels) in enumerate(train_loader):
             labels = labels.to(device)
             data = {k: v.to(device) for k, v in data.items()}
@@ -653,6 +654,13 @@ def finetuner(checkpoint_path, data_dir, output_path,
             preds = logits.argmax(dim=1)
             train_correct += (preds == labels).sum().item()
             train_total += labels.size(0)
+
+            # Progression toutes les 50 batches
+            if (batch_idx + 1) % 50 == 0 or (batch_idx + 1) == n_batches:
+                running_acc = train_correct / max(train_total, 1) * 100
+                print("    Epoch %02d | batch %d/%d | loss=%.4f | acc=%.1f%%" % (
+                    epoch + 1, batch_idx + 1, n_batches,
+                    loss.item(), running_acc), flush=True)
 
         scheduler.step()
 
@@ -687,7 +695,7 @@ def finetuner(checkpoint_path, data_dir, output_path,
         print("  Epoch %02d/%02d | train_loss=%.4f train_acc=%.1f%% | "
               "val_loss=%.4f val_acc=%.1f%%" % (
                   epoch + 1, epochs, train_loss, train_acc,
-                  val_loss, val_acc))
+                  val_loss, val_acc), flush=True)
 
         # Early stopping / best model
         if val_acc > best_val_acc:
