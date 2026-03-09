@@ -231,25 +231,28 @@ try {
     # Ignorer : l'hote n'est peut-etre pas dans known_hosts
 }
 
+# Etape 3a : Attendre que le port 22 soit ouvert (TCP)
 $sshReady = $false
 $sshTimeout = 600      # 10 minutes
-$sshInterval = 15      # secondes entre chaque tentative
+$sshInterval = 10      # secondes entre chaque tentative
 $sshElapsed = 0
 
-Log-Info "Attente du serveur SSH (timeout: ${sshTimeout}s)..."
+Log-Info "Attente du port SSH 22 sur $PublicIP (timeout: ${sshTimeout}s)..."
 
 while ($sshElapsed -lt $sshTimeout) {
     try {
-        # Ne pas utiliser BatchMode=yes : empeche l'authentification via ssh-agent Windows
-        # Convertir en string pour eviter les problemes de match sur ErrorRecord[]
-        $result = (ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "root@$PublicIP" "echo ok" 2>&1) | Out-String
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $connect = $tcp.BeginConnect($PublicIP, 22, $null, $null)
+        $wait = $connect.AsyncWaitHandle.WaitOne(5000, $false)
+        if ($wait -and $tcp.Connected) {
+            $tcp.Close()
+            Log-Ok "Port SSH 22 ouvert apres ${sshElapsed}s"
+            $sshReady = $true
+            break
+        }
+        $tcp.Close()
     } catch {
-        $result = ""
-    }
-    if ($result -match "ok") {
-        Log-Ok "SSH disponible apres ${sshElapsed}s"
-        $sshReady = $true
-        break
+        # Port pas encore ouvert
     }
     $sshElapsed += $sshInterval
     if ($sshElapsed -lt $sshTimeout) {
@@ -259,11 +262,36 @@ while ($sshElapsed -lt $sshTimeout) {
 }
 
 if (-not $sshReady) {
-    Log-Error "Timeout SSH apres ${sshTimeout}s"
-    Log-Info "L'instance est peut-etre encore en cours de demarrage."
+    Log-Error "Timeout SSH apres ${sshTimeout}s - le port 22 n'a jamais repondu."
     Log-Info "Essayez manuellement : ssh root@$PublicIP"
     Log-Info "Pour supprimer : scw instance server terminate $ServerId zone=$Zone with-ip=true"
     exit 1
+}
+
+# Etape 3b : Petite pause pour laisser sshd finir son initialisation
+Log-Info "Attente de 10s supplementaires pour l'initialisation de sshd..."
+Start-Sleep -Seconds 10
+
+# Etape 3c : Verifier la connexion SSH reelle
+Log-Info "Test de connexion SSH..."
+$sshTestOk = $false
+for ($i = 1; $i -le 5; $i++) {
+    try {
+        $result = (ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "root@$PublicIP" "echo maestro_ready" 2>&1) | Out-String
+        if ($result -match "maestro_ready") {
+            Log-Ok "Connexion SSH verifiee"
+            $sshTestOk = $true
+            break
+        }
+    } catch { }
+    Log-Info "  Tentative SSH $i/5 echouee, nouvel essai dans 10s..."
+    Start-Sleep -Seconds 10
+}
+
+if (-not $sshTestOk) {
+    Log-Warn "Le test SSH a echoue mais le port est ouvert."
+    Log-Warn "Le script continue - si l'etape 4 echoue, connectez-vous manuellement :"
+    Log-Warn "  ssh root@$PublicIP"
 }
 
 # --- Etape 4 : Deployer et lancer l'entrainement ---
