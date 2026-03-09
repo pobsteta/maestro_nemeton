@@ -234,21 +234,27 @@ try {
 Log-Info "Attente du serveur SSH..."
 
 $sshReady = $false
-$maxAttempts = 90  # 90 x 5s = 450s (7.5 minutes) - les GPU instances sont lentes a demarrer
-for ($i = 1; $i -le $maxAttempts; $i++) {
+$sshTimeout = 600      # 10 minutes
+$sshInterval = 15      # secondes entre chaque tentative
+$sshElapsed = 0
+
+Log-Info "Attente du serveur SSH (timeout: ${sshTimeout}s)..."
+
+while ($sshElapsed -lt $sshTimeout) {
     $result = $null
     try {
-        $result = ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" -o BatchMode=yes "root@$PublicIP" "echo ok" 2>&1
+        $result = ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" -o BatchMode=yes "root@$PublicIP" "echo ok" 2>&1
     } catch { }
     if ($result -match "ok") {
-        Log-Ok "SSH disponible"
+        Log-Ok "SSH disponible apres ${sshElapsed}s"
         $sshReady = $true
         break
     }
-    if ($i % 6 -eq 0) {
-        Log-Info "  Toujours en attente du SSH... ($($i * 5)s/$($maxAttempts * 5)s)"
+    $sshElapsed += $sshInterval
+    if ($sshElapsed -lt $sshTimeout) {
+        Log-Info "  Toujours en attente du SSH... (${sshElapsed}s/${sshTimeout}s)"
     }
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds $sshInterval
 }
 
 if (-not $sshReady) {
