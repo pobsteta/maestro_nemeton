@@ -146,13 +146,45 @@ try {
 if ($existingServers -and $existingServers.Count -gt 0) {
     $existing = $existingServers[0]
     Log-Warn "Instance '$InstanceName' deja existante : $($existing.id) (etat: $($existing.state))"
-    Log-Info "Reutilisation de l'instance existante."
-    $ServerId = $existing.id
 
-    # Demarrer si arretee
-    if ($existing.state -eq "stopped") {
+    # Si l'instance est en cours de suppression, attendre qu'elle disparaisse
+    if ($existing.state -match "stopping|stopped_in_place|locked") {
+        Log-Info "Instance en cours de suppression, attente..."
+        $waitMax = 120
+        $waitElapsed = 0
+        while ($waitElapsed -lt $waitMax) {
+            Start-Sleep -Seconds 10
+            $waitElapsed += 10
+            $checkRaw = scw instance server list zone=$Zone name=$InstanceName -o json 2>&1
+            $checkServers = $null
+            try { $checkServers = $checkRaw | ConvertFrom-Json } catch { }
+            if (-not $checkServers -or $checkServers.Count -eq 0) {
+                Log-Ok "Instance supprimee apres ${waitElapsed}s"
+                break
+            }
+            Log-Info "  Attente... (${waitElapsed}s / ${waitMax}s, etat: $($checkServers[0].state))"
+        }
+        # Re-verifier
+        $existingRaw = scw instance server list zone=$Zone name=$InstanceName -o json 2>&1
+        $existingServers = $null
+        try { $existingServers = $existingRaw | ConvertFrom-Json } catch { }
+    }
+}
+
+if ($existingServers -and $existingServers.Count -gt 0) {
+    $existing = $existingServers[0]
+
+    if ($existing.state -eq "running") {
+        Log-Warn "Reutilisation de l'instance en cours d'execution."
+        $ServerId = $existing.id
+    } elseif ($existing.state -eq "stopped") {
         Log-Info "Demarrage de l'instance arretee..."
+        $ServerId = $existing.id
         scw instance server action run $ServerId zone=$Zone 2>&1 | Out-Null
+    } else {
+        Log-Error "Instance dans un etat inattendu : $($existing.state)"
+        Log-Info "Supprimez-la manuellement : scw instance server terminate $($existing.id) zone=$Zone with-ip=true"
+        exit 1
     }
 } else {
     Log-Info "Creation de l'instance $InstanceType avec volume data ${DataVolumeGB}Go..."
