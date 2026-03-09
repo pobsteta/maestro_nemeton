@@ -306,10 +306,10 @@ if (-not $sshTestOk) {
 Write-Host ""
 Log-Info "=== Etape 3b : Montage du volume data ==="
 Log-Info "Formatage et montage du volume data sur /data..."
-# Le volume additionnel peut apparaitre comme /dev/vdb ou /dev/sdb selon l'instance
-# On detecte automatiquement le disque non monte sans partitions (le volume data)
-# Note : les $ dans les commandes bash sont echappes avec ` pour PowerShell
-ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "set -e; DEVICE=`$(lsblk -dnpo NAME,TYPE | awk '`$2==""disk"" && `$1!=""/dev/sda"" && `$1!=""/dev/vda"" {print `$1; exit}'); if [ -z ""`$DEVICE"" ]; then echo ERREUR: aucun disque data trouve; lsblk; exit 1; fi; echo ""Device detecte: `$DEVICE""; blkid `$DEVICE | grep -q ext4 || mkfs.ext4 -q `$DEVICE; mkdir -p /data; mount `$DEVICE /data; df -h /data"
+# Le volume additionnel peut apparaitre comme /dev/sdb, /dev/vdb ou /dev/xvdb selon l'instance
+# On envoie un petit script bash pour eviter les problemes d'echappement PowerShell
+$MountScript = 'DEVICE=""; for d in /dev/sdb /dev/vdb /dev/xvdb; do [ -b "$d" ] && ! mountpoint -q "$d" 2>/dev/null && DEVICE="$d" && break; done; if [ -z "$DEVICE" ]; then echo "ERREUR: aucun disque data trouve"; lsblk; exit 1; fi; echo "Device detecte: $DEVICE"; blkid "$DEVICE" | grep -q ext4 || mkfs.ext4 -q "$DEVICE"; mkdir -p /data; mount "$DEVICE" /data; df -h /data'
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" $MountScript
 
 # --- Etape 4 : Deployer et lancer l'entrainement ---
 Write-Host ""
