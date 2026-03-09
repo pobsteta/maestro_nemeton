@@ -190,18 +190,34 @@ log_ok "Instance prete: $PUBLIC_IP"
 # --- Etape 3 : Attendre que SSH soit disponible ---
 echo ""
 log_info "=== Etape 3 : Connexion SSH ==="
-log_info "Attente du serveur SSH..."
 
-for i in $(seq 1 30); do
-    if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "root@$PUBLIC_IP" "echo ok" &>/dev/null; then
-        log_ok "SSH disponible"
+# Nettoyer les anciennes cles SSH pour cette IP
+ssh-keygen -R "$PUBLIC_IP" &>/dev/null 2>&1 || true
+log_info "Nettoyage des anciennes cles SSH pour $PUBLIC_IP..."
+
+# Les instances GPU Scaleway peuvent mettre 5-10 min pour initialiser SSH
+# (drivers NVIDIA, cloud-init, configuration reseau)
+SSH_TIMEOUT=600
+SSH_INTERVAL=15
+SSH_ELAPSED=0
+
+log_info "Attente du serveur SSH (timeout: ${SSH_TIMEOUT}s)..."
+
+while [ "$SSH_ELAPSED" -lt "$SSH_TIMEOUT" ]; do
+    if ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o BatchMode=yes "root@$PUBLIC_IP" "echo ok" &>/dev/null; then
+        log_ok "SSH disponible apres ${SSH_ELAPSED}s"
         break
     fi
-    if [ "$i" -eq 30 ]; then
-        log_error "Timeout SSH apres 150s"
+    SSH_ELAPSED=$((SSH_ELAPSED + SSH_INTERVAL))
+    if [ "$SSH_ELAPSED" -ge "$SSH_TIMEOUT" ]; then
+        log_error "Timeout SSH apres ${SSH_TIMEOUT}s"
+        log_info "L'instance est peut-etre encore en cours de demarrage."
+        log_info "Essayez manuellement : ssh root@$PUBLIC_IP"
+        log_info "Pour supprimer : scw instance server terminate $SERVER_ID zone=$ZONE with-ip=true"
         exit 1
     fi
-    sleep 5
+    log_info "  Toujours en attente du SSH... (${SSH_ELAPSED}s/${SSH_TIMEOUT}s)"
+    sleep "$SSH_INTERVAL"
 done
 
 # --- Etape 4 : Deployer et lancer l'entrainement ---
