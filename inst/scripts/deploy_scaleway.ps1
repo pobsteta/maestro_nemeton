@@ -193,7 +193,7 @@ Log-Info "Envoi du script d'entrainement..."
 scp -o StrictHostKeyChecking=no "$RepoRoot\inst\scripts\cloud_train.sh" "root@${PublicIP}:~/"
 
 # Preparer le flag unfreeze
-$UnfreezeVal = if ($Unfreeze) { "1" } else { "" }
+$UnfreezeVal = $(if ($Unfreeze) { "1" } else { "" })
 
 # Lancer l'entrainement dans tmux
 Log-Info "Lancement de l'entrainement dans tmux..."
