@@ -42,7 +42,7 @@ modele_aerial <- maestro_py$charger_modele(
 )
 
 # Forward pass avec image aleatoire
-dummy_aerial <- np$random$randn(1L, 4L, 256L, 256L)$astype(np$float32)
+dummy_aerial <- np$array(np$random$randn(1L, 4L, 256L, 256L), dtype = np$float32)
 result <- maestro_py$predire_patch(modele_aerial, dummy_aerial, device = "cpu")
 message(sprintf("  Prediction: classe %d (%s)", result$classe, result$essence))
 message("  OK!")
@@ -57,8 +57,8 @@ modele_multi <- maestro_py$charger_modele(
 )
 
 donnees <- list(
-  aerial = np$random$randn(1L, 4L, 256L, 256L)$astype(np$float32),
-  dem = np$random$randn(1L, 2L, 256L, 256L)$astype(np$float32)
+  aerial = np$array(np$random$randn(1L, 4L, 256L, 256L), dtype = np$float32),
+  dem = np$array(np$random$randn(1L, 2L, 256L, 256L), dtype = np$float32)
 )
 result2 <- maestro_py$predire_multimodal(modele_multi, donnees, device = "cpu")
 message(sprintf("  Prediction: classe %d (%s)",

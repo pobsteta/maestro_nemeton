@@ -41,11 +41,20 @@ find_checkpoint_name <- function(hf_repo) {
 #' @return Chemin valide (le meme si OK, ou apres copie du blob)
 #' @keywords internal
 reparer_symlink_hf <- function(chemin) {
-  if (file.exists(chemin)) return(chemin)
+  # Tester la lisibilite reelle (file.exists retourne TRUE pour les
+  # symlinks casses sur Windows)
+  lisible <- tryCatch({
+    con <- file(chemin, "rb")
+    close(con)
+    TRUE
+  }, warning = function(w) FALSE, error = function(e) FALSE)
+
+  if (lisible) return(chemin)
+
+  message("  [Windows] Fichier inaccessible, recherche du blob reel...")
 
   # Le chemin est sous .../snapshots/<hash>/...
   # Le blob correspondant est sous .../blobs/<sha256>
-  # On cherche dans le dossier blobs le fichier le plus gros (= le checkpoint)
   cache_root <- chemin
   while (!grepl("snapshots$", basename(dirname(cache_root))) &&
          nchar(cache_root) > 3) {
@@ -70,20 +79,12 @@ reparer_symlink_hf <- function(chemin) {
   blob_path <- blobs[which.max(sizes)]
   blob_size <- max(sizes, na.rm = TRUE)
 
-  message(sprintf("  [Windows] Symlink casse, copie du blob (%.0f Mo)...",
-                  blob_size / 1e6))
+  message(sprintf("  [Windows] Utilisation directe du blob (%.0f Mo): %s",
+                  blob_size / 1e6, blob_path))
 
-  # Creer les dossiers parents si necessaire
-  dir.create(dirname(chemin), recursive = TRUE, showWarnings = FALSE)
-  file.copy(blob_path, chemin, overwrite = TRUE)
-
-  if (file.exists(chemin)) {
-    message("  [Windows] Checkpoint copie avec succes")
-  } else {
-    warning("Impossible de copier le blob vers: ", chemin)
-  }
-
-  chemin
+  # Retourner directement le chemin du blob (pas de copie, evite les
+  # problemes de permission)
+  blob_path
 }
 
 #' Telecharger le modele MAESTRO depuis Hugging Face

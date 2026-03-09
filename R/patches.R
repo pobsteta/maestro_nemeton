@@ -119,21 +119,53 @@ extraire_patches_raster <- function(r, grille, taille_pixels = 250) {
   patches_data
 }
 
+#' Taille de patch par modalite MAESTRO
+#'
+#' Retourne la taille de patch en pixels attendue par le modele MAESTRO
+#' pour chaque modalite. Les modalites a haute resolution (aerial, dem)
+#' utilisent 250 pixels, tandis que les modalites Sentinel (10m) utilisent
+#' 5 pixels pour couvrir la meme emprise de 50m.
+#'
+#' @param mod_name Nom de la modalite
+#' @param taille_pixels_ref Taille de reference (defaut: 250 pour aerial)
+#' @return Entier : nombre de pixels pour ce patch
+#' @export
+taille_patch_modalite <- function(mod_name, taille_pixels_ref = 250L) {
+  # Modalites a 10m de resolution : 50m / 10m = 5 pixels
+  sentinel_mods <- c("s2", "s1_asc", "s1_des")
+  if (mod_name %in% sentinel_mods) {
+    return(5L)
+  }
+  # aerial et dem : taille de reference (250px a 0.2m)
+  as.integer(taille_pixels_ref)
+}
+
 #' Extraire les patches multi-modaux depuis plusieurs SpatRasters
 #'
 #' Pour chaque patch de la grille, extrait les valeurs de chaque modalite
-#' (aerial, dem, etc.) separement. Les donnees sont structurees pour etre
-#' passees au modele MAESTRO multi-modal.
+#' (aerial, dem, s2, s1_asc, s1_des) separement. Chaque modalite est
+#' reechantillonnee a sa taille de patch native :
+#'   - aerial, dem : 250 x 250 pixels (0.2m)
+#'   - s2, s1_asc, s1_des : 5 x 5 pixels (10m)
 #'
-#' @param modalites Liste nommee de SpatRasters (ex: `list(aerial=..., dem=...)`)
+#' Les donnees sont structurees pour etre passees au modele MAESTRO.
+#'
+#' @param modalites Liste nommee de SpatRasters (ex: `list(aerial=..., dem=..., s2=...)`)
 #' @param grille sf grille de patches (issue de [creer_grille_patches()])
-#' @param taille_pixels Taille cible de chaque patch en pixels (defaut: 250)
+#' @param taille_pixels Taille cible pour aerial/dem en pixels (defaut: 250)
 #' @return Liste de listes nommees, chaque element contient les matrices
-#'   (H*W x C) pour chaque modalite. Ex: `patches[[i]]$aerial`, `patches[[i]]$dem`
+#'   (H*W x C) pour chaque modalite. Ex: `patches[[i]]$aerial`, `patches[[i]]$s2`
 #' @export
 extraire_patches_multimodal <- function(modalites, grille, taille_pixels = 250) {
   message("=== Extraction des patches multi-modaux ===")
   message(sprintf("  Modalites: %s", paste(names(modalites), collapse = ", ")))
+
+  # Afficher la taille de patch pour chaque modalite
+  for (mod_name in names(modalites)) {
+    tp <- taille_patch_modalite(mod_name, taille_pixels)
+    message(sprintf("    %s: %d x %d px (%d bandes)",
+                     mod_name, tp, tp, terra::nlyr(modalites[[mod_name]])))
+  }
 
   n_patches <- nrow(grille)
   patches <- vector("list", n_patches)
@@ -155,9 +187,10 @@ extraire_patches_multimodal <- function(modalites, grille, taille_pixels = 250) 
     if (!overlap) {
       patch_data <- list()
       for (mod_name in names(modalites)) {
+        tp <- taille_patch_modalite(mod_name, taille_pixels)
         n_bands <- terra::nlyr(modalites[[mod_name]])
         patch_data[[mod_name]] <- matrix(NA_real_,
-                                          nrow = taille_pixels * taille_pixels,
+                                          nrow = tp * tp,
                                           ncol = n_bands)
       }
       patches[[i]] <- patch_data
@@ -168,6 +201,7 @@ extraire_patches_multimodal <- function(modalites, grille, taille_pixels = 250) 
     patch_data <- list()
     for (mod_name in names(modalites)) {
       r <- modalites[[mod_name]]
+      tp <- taille_patch_modalite(mod_name, taille_pixels)
 
       crop_result <- tryCatch(
         terra::crop(r, ext_patch),
@@ -177,16 +211,17 @@ extraire_patches_multimodal <- function(modalites, grille, taille_pixels = 250) 
       if (is.null(crop_result)) {
         n_bands <- terra::nlyr(r)
         patch_data[[mod_name]] <- matrix(NA_real_,
-                                          nrow = taille_pixels * taille_pixels,
+                                          nrow = tp * tp,
                                           ncol = n_bands)
         next
       }
 
-      if (terra::ncol(crop_result) != taille_pixels ||
-          terra::nrow(crop_result) != taille_pixels) {
+      # Reechantillonner a la taille de patch de cette modalite
+      if (terra::ncol(crop_result) != tp ||
+          terra::nrow(crop_result) != tp) {
         template <- terra::rast(
           ext = ext_patch,
-          nrows = taille_pixels, ncols = taille_pixels,
+          nrows = tp, ncols = tp,
           crs = terra::crs(r),
           nlyrs = terra::nlyr(r)
         )

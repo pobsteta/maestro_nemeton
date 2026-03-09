@@ -1,15 +1,20 @@
 Package: maestro
-Title: Forest Species Recognition Using MAESTRO Model and IGN Data
-Version: 0.1.0
+Title: Forest Species and Land Cover Classification Using MAESTRO and FLAIR Models
+Version: 0.2.0
 Authors@R:
     person("Pierre", "Obsteta", role = c("aut", "cre"),
            email = "pierre.obsteta@example.com")
-Description: Automatic recognition of forest tree species from an area of
-    interest (AOI) using the MAESTRO model from IGNF (Hugging Face). Downloads
-    orthophotos (RGB, IRC) and DTM data from the IGN Geoplateforme via WMS-R,
-    combines them into a multi-band image (R, G, B, NIR, DTM), and runs
-    inference with a Vision Transformer (ViT/MAE) to classify 13 PureForest
-    species.
+Description: Automatic recognition of forest tree species (13 PureForest classes)
+    and land cover classification (19 CoSIA classes) from an area of interest (AOI)
+    using MAESTRO and FLAIR models from IGNF (Hugging Face). Downloads orthophotos
+    (RGB, IRC) and DEM data from the IGN Geoplateforme via WMS-R. Optionally
+    downloads Sentinel-2 (10 spectral bands) and Sentinel-1 (VV+VH radar) via the
+    Copernicus Data Space STAC API. MAESTRO pipeline classifies forest species per
+    patch using a Vision Transformer (ViT/MAE) with up to 6 modalities (aerial,
+    DEM, S2, S1 ascending, S1 descending). FLAIR pipeline performs pixel-level
+    semantic segmentation using UNet/UPerNet architectures with Hann window
+    blending. Includes spectral indices (NDVI, GNDVI, SAVI) and evaluation
+    metrics (mIoU).
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -22,11 +27,15 @@ Imports:
     curl,
     fs,
     jsonlite,
-    reticulate
+    reticulate,
+    rstac
 Suggests:
     ggplot2,
     patchwork,
     scales,
     hfhub,
     optparse,
+    rmarkdown,
+    knitr,
     testthat (>= 3.0.0)
+VignetteBuilder: knitr

@@ -65,6 +65,22 @@ ESSENCES_LABELS <- c(
   "Epicea", "Sapin", "Douglas", "Meleze", "Peuplier"
 )
 
+# Palette de couleurs pour les 7 classes TreeSatAI regroupees
+ESSENCES_TSA_COLORS <- c(
+  "#2ca02c",   # 0  Chene          - vert fonce
+  "#ff7f0e",   # 1  Hetre          - orange
+  "#1f77b4",   # 2  Pin            - bleu
+  "#17becf",   # 3  Epicea         - cyan
+  "#8c564b",   # 4  Douglas/Sapin  - brun
+  "#e377c2",   # 5  Meleze         - rose
+  "#bcbd22"    # 6  Feuillus div.  - jaune-vert
+)
+
+ESSENCES_TSA_LABELS <- c(
+  "Chene", "Hetre", "Pin", "Epicea",
+  "Douglas/Sapin", "Meleze", "Feuillus divers"
+)
+
 # =============================================================================
 # Fonctions de visualisation (pattern FLAIR-HUB : terra base R)
 # =============================================================================

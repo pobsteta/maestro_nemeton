@@ -44,6 +44,18 @@ ESSENCES = [
     "Peuplier",            # 12 - Populus spp.
 ]
 
+# Classes regroupees TreeSatAI (7 classes) - schema simplifie
+# Utilise pour le fine-tuning tant que le LiDAR n'est pas integre
+ESSENCES_TREESATAI = [
+    "Chene",              # 0 - Quercus spp.
+    "Hetre",              # 1 - Fagus sylvatica
+    "Pin",                # 2 - Pinus spp.
+    "Epicea",             # 3 - Picea abies
+    "Douglas/Sapin",      # 4 - Pseudotsuga + Abies (sempervirents sombres)
+    "Meleze",             # 5 - Larix spp. (caduc)
+    "Feuillus divers",    # 6 - Betula, Populus, Alnus, Fraxinus, Acer, etc.
+]
+
 # Configuration des modalites MAESTRO
 MODALITIES = {
     "aerial": {"in_channels": 4, "patch_size": (16, 16)},
@@ -309,6 +321,69 @@ class MAESTROClassifier(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Utilitaire pour resoudre les symlinks casses du cache HuggingFace (Windows)
+# ---------------------------------------------------------------------------
+
+def _resoudre_chemin_hf(chemin):
+    """Resout le chemin reel d'un fichier du cache HuggingFace.
+
+    Sur Windows sans mode developpeur, hfhub cree des symlinks qui echouent.
+    Le fichier dans snapshots/ n'existe pas reellement. Le blob reel est dans
+    le dossier blobs/ du meme modele. Cette fonction le retrouve.
+    """
+    import os
+    chemin = Path(chemin)
+
+    # Si le fichier est accessible, pas besoin de resolution
+    try:
+        with open(str(chemin), "rb") as f:
+            f.read(1)
+        return chemin
+    except (PermissionError, FileNotFoundError, OSError):
+        pass
+
+    # Remonter jusqu'au dossier snapshots/
+    parts = chemin.parts
+    for i, part in enumerate(parts):
+        if part == "snapshots":
+            model_dir = Path(*parts[:i])
+            break
+    else:
+        raise FileNotFoundError(
+            "Impossible de trouver le dossier du modele HF pour: %s" % chemin)
+
+    blobs_dir = model_dir / "blobs"
+    if not blobs_dir.exists():
+        raise FileNotFoundError("Dossier blobs introuvable: %s" % blobs_dir)
+
+    # Chercher le pointer file qui reference le blob
+    # Les fichiers pointer HF contiennent juste le hash sha256
+    pointer_path = chemin
+    if pointer_path.exists():
+        try:
+            content = pointer_path.read_text(encoding="utf-8").strip()
+            # Si c'est un hash (64 chars hex), le blob est blobs/<hash>
+            if len(content) == 64:
+                blob_candidate = blobs_dir / content
+                if blob_candidate.exists():
+                    print("  [Windows] Utilisation du blob via pointer: %s"
+                          % blob_candidate)
+                    return blob_candidate
+        except Exception:
+            pass
+
+    # Fallback: prendre le plus gros blob (= le checkpoint)
+    blobs = list(blobs_dir.iterdir())
+    if not blobs:
+        raise FileNotFoundError("Aucun blob dans: %s" % blobs_dir)
+
+    biggest = max(blobs, key=lambda p: p.stat().st_size)
+    size_mb = biggest.stat().st_size / 1e6
+    print("  [Windows] Symlink casse, utilisation directe du blob (%.0f Mo)"
+          % size_mb)
+    return biggest
+
+
 # Module stubs pour charger le checkpoint pickle
 # ---------------------------------------------------------------------------
 
@@ -466,35 +541,51 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
     checkpoint = _load_checkpoint_file(chemin, device)
     state_dict = _extract_state_dict(checkpoint)
 
-    # Filtrer: garder les cles pour les modalites selectionnees + encoder_inter
-    prefixes_gardees = ["model.encoder_inter."]
-    for mod_name in mod_names:
-        prefixes_gardees.append("model.patch_embed.%s." % mod_name)
-        enc_name = S1_ENCODER_KEY if mod_name.startswith("s1_") else mod_name
-        prefixes_gardees.append("model.encoder.%s." % enc_name)
+    # Detecter si le checkpoint contient deja la tete de classification
+    # (= checkpoint fine-tune complet) ou seulement les encodeurs (= pre-train MAE)
+    has_head = any(k.startswith("head.") for k in state_dict)
 
-    prefixes_tuple = tuple(prefixes_gardees)
-    filtered_sd = {k: v for k, v in state_dict.items()
-                   if k.startswith(prefixes_tuple)}
+    if has_head:
+        # Checkpoint fine-tune: charger tout (tete incluse)
+        print("  [INFO] Checkpoint fine-tune detecte (tete de classification incluse)")
+        filtered_sd = {k: v for k, v in state_dict.items()
+                       if not k.startswith("_") }
+        print("  Checkpoint: %d cles (fine-tune complet)" % len(filtered_sd))
+        missing, unexpected = modele.load_state_dict(filtered_sd, strict=False)
+        if missing:
+            print("  [INFO] Cles manquantes: %d" % len(missing))
+        if unexpected:
+            print("  [INFO] Cles inattendues (ignorees): %d" % len(unexpected))
+    else:
+        # Checkpoint MAE pre-train: filtrer par modalite, tete sera aleatoire
+        prefixes_gardees = ["model.encoder_inter."]
+        for mod_name in mod_names:
+            prefixes_gardees.append("model.patch_embed.%s." % mod_name)
+            enc_name = S1_ENCODER_KEY if mod_name.startswith("s1_") else mod_name
+            prefixes_gardees.append("model.encoder.%s." % enc_name)
 
-    print("  Checkpoint: %d cles totales, %d cles utilisees"
-          % (len(state_dict), len(filtered_sd)))
+        prefixes_tuple = tuple(prefixes_gardees)
+        filtered_sd = {k: v for k, v in state_dict.items()
+                       if k.startswith(prefixes_tuple)}
 
-    # Charger les poids (mode non strict pour la tete de classification)
-    missing, unexpected = modele.load_state_dict(filtered_sd, strict=False)
+        print("  Checkpoint: %d cles totales, %d cles utilisees"
+              % (len(state_dict), len(filtered_sd)))
 
-    # Analyser les cles manquantes
-    missing_head = [k for k in missing if k.startswith("head.")]
-    missing_other = [k for k in missing if not k.startswith("head.")]
-    if missing_other:
-        print("  [ATTENTION] Cles manquantes (non-head): %d" % len(missing_other))
-        for k in missing_other[:10]:
-            print("    - %s" % k)
-    if missing_head:
-        print("  [INFO] Tete de classification non pre-entrainee "
-              "(%d cles, attendu)" % len(missing_head))
-    if unexpected:
-        print("  [INFO] Cles inattendues (ignorees): %d" % len(unexpected))
+        # Charger les poids (mode non strict pour la tete de classification)
+        missing, unexpected = modele.load_state_dict(filtered_sd, strict=False)
+
+        # Analyser les cles manquantes
+        missing_head = [k for k in missing if k.startswith("head.")]
+        missing_other = [k for k in missing if not k.startswith("head.")]
+        if missing_other:
+            print("  [ATTENTION] Cles manquantes (non-head): %d" % len(missing_other))
+            for k in missing_other[:10]:
+                print("    - %s" % k)
+        if missing_head:
+            print("  [INFO] Tete de classification non pre-entrainee "
+                  "(%d cles, attendu)" % len(missing_head))
+        if unexpected:
+            print("  [INFO] Cles inattendues (ignorees): %d" % len(unexpected))
 
     modele = modele.to(device)
     modele.eval()
@@ -672,9 +763,13 @@ def predire_patch(modele, image_np, device="cpu"):
         probs = torch.softmax(logits, dim=1)
         classe = torch.argmax(probs, dim=1).item()
 
+    # Choisir les noms de classes selon le nombre de sorties du modele
+    n_out = probs.shape[1]
+    names = ESSENCES_TREESATAI if n_out == len(ESSENCES_TREESATAI) else ESSENCES
+
     return {
         "classe": classe,
-        "essence": ESSENCES[classe] if classe < len(ESSENCES) else "Classe_%d" % classe,
+        "essence": names[classe] if classe < len(names) else "Classe_%d" % classe,
         "probabilites": probs.cpu().numpy().flatten().tolist(),
     }
 
@@ -700,8 +795,12 @@ def predire_multimodal(modele, donnees, device="cpu"):
         probs = torch.softmax(logits, dim=1)
         classes = torch.argmax(probs, dim=1).cpu().numpy().tolist()
 
+    # Choisir les noms de classes selon le nombre de sorties du modele
+    n_out = probs.shape[1]
+    names = ESSENCES_TREESATAI if n_out == len(ESSENCES_TREESATAI) else ESSENCES
+
     essences = [
-        ESSENCES[c] if c < len(ESSENCES) else "Classe_%d" % c
+        names[c] if c < len(names) else "Classe_%d" % c
         for c in classes
     ]
 

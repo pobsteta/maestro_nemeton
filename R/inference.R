@@ -81,7 +81,7 @@ configurer_python <- function(envname = CONDA_ENV) {
   message("Environnement conda configure: ", envname)
 
   # Verifier les modules disponibles
-  modules <- c("torch", "numpy", "safetensors")
+  modules <- c("torch", "numpy", "safetensors", "tifffile", "PIL")
   ok <- TRUE
   for (mod in modules) {
     avail <- reticulate::py_module_available(mod)
@@ -92,7 +92,7 @@ configurer_python <- function(envname = CONDA_ENV) {
   if (!ok) {
     stop("Modules Python manquants. Installez-les dans l'env '", envname, "':\n",
          "  conda activate ", envname, "\n",
-         "  pip install torch numpy safetensors")
+         "  pip install torch numpy safetensors tifffile Pillow")
   }
 
   message("  Python configure.")
@@ -266,10 +266,15 @@ executer_inference_multimodal <- function(patches_multimodal, fichiers_modele,
   predictions <- vector("list", n_patches)
   n_batches <- ceiling(n_patches / batch_size)
 
-  # Determiner la taille des patches depuis la premiere modalite
+  # Determiner la taille de patch par modalite
   first_patch <- patches_multimodal[[1]]
-  first_mod <- names(first_patch)[1]
-  patch_size <- as.integer(sqrt(nrow(first_patch[[first_mod]])))
+  patch_sizes <- list()
+  for (mod_name in names(first_patch)) {
+    patch_sizes[[mod_name]] <- as.integer(sqrt(nrow(first_patch[[mod_name]])))
+  }
+  message(sprintf("  Tailles patches: %s",
+                   paste(names(patch_sizes), patch_sizes, sep = "=",
+                         collapse = ", ")))
 
   for (b in seq_len(n_batches)) {
     debut <- (b - 1L) * batch_size + 1L
@@ -280,12 +285,14 @@ executer_inference_multimodal <- function(patches_multimodal, fichiers_modele,
     # Construire un dict numpy par modalite
     batch_dict <- list()
     for (mod_name in modalites) {
+      ps <- patch_sizes[[mod_name]]
+
       # Empiler les matrices (H*W, C) du batch pour cette modalite
       mod_arrays <- lapply(batch_patches, function(p) {
         mat <- p[[mod_name]]
         # Reshape (H*W, C) -> (C, H, W)
         C <- ncol(mat)
-        arr <- array(mat, dim = c(patch_size, patch_size, C))
+        arr <- array(mat, dim = c(ps, ps, C))
         arr <- aperm(arr, c(3, 1, 2))  # (C, H, W)
         arr
       })
