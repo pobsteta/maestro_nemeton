@@ -309,14 +309,18 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 
 # Copier le script d'entrainement
 Log-Info "Envoi du script d'entrainement..."
-scp -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "$RepoRoot\inst\scripts\cloud_train.sh" "root@${PublicIP}:~/"
+scp -o StrictHostKeyChecking=accept-new "$RepoRoot\inst\scripts\cloud_train.sh" "root@${PublicIP}:~/"
+
+# Convertir les fins de ligne CRLF -> LF (le fichier vient de Windows)
+Log-Info "Conversion des fins de ligne CRLF -> LF..."
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "sed -i 's/\r$//' ~/cloud_train.sh"
 
 # Preparer le flag unfreeze
 $UnfreezeVal = $(if ($Unfreeze) { "1" } else { "" })
 
 # Lancer l'entrainement dans tmux
 Log-Info "Lancement de l'entrainement dans tmux..."
-ssh -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "root@$PublicIP" @"
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" @"
 apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
 tmux new-session -d -s maestro "export EPOCHS=$Epochs; export BATCH_SIZE=$BatchSize; export LR=$LR; export MODALITES=$Modalites; export UNFREEZE=$UnfreezeVal; bash ~/cloud_train.sh 2>&1 | tee ~/train.log"
 "@

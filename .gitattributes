@@ -1,0 +1,2 @@
+# Forcer les fins de ligne LF pour les scripts shell (meme sur Windows)
+*.sh text eol=lf
