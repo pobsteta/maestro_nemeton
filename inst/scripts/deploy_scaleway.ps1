@@ -18,19 +18,18 @@
 #   .\inst\scripts\deploy_scaleway.ps1 -InstanceType L4-1-24G -Epochs 50
 #   .\inst\scripts\deploy_scaleway.ps1 -DryRun
 #
-# Instances GPU Scaleway recommandees :
-#   GPU-3070-S   : RTX 3070 (8 Go VRAM)  - ~0.76 EUR/h - suffisant pour aerial seul
-#   L4-1-24G     : NVIDIA L4 (24 Go VRAM) - ~0.92 EUR/h - recommande multi-modal
-#   H100-1-80G   : H100 (80 Go VRAM)     - ~3.50 EUR/h - entrainement rapide
+# Instances GPU Scaleway recommandees (verifiez la disponibilite avec scw instance server-type list) :
+#   RENDER-S : GPU (petit)  - entree de gamme
+#   L4-1-24G : NVIDIA L4 (24 Go VRAM) - bon rapport qualite/prix
+#   H100-1-80G : H100 (80 Go VRAM) - entrainement rapide
 #
-# Cout estime pour 30 epochs (aerial, batch_size=64) :
-#   GPU-3070-S : ~2-3h -> ~2 EUR
-#   L4-1-24G   : ~1-2h -> ~1.50 EUR
+# Listez les types disponibles dans votre zone :
+#   scw instance server-type list zone=fr-par-2 | findstr -i gpu
 # =============================================================================
 
 [CmdletBinding()]
 param(
-    [string]$InstanceType = "GPU-3070-S",
+    [string]$InstanceType = "L4-1-24G",
     [string]$Image = "ubuntu_jammy_gpu_os_12",
     [string]$Zone = "fr-par-2",
     [string]$InstanceName = "maestro-train",
@@ -135,13 +134,32 @@ Write-Host ""
 Log-Info "=== Etape 1 : Creation de l'instance GPU ==="
 Log-Info "Creation de l'instance $InstanceType..."
 
-$ServerJson = scw instance server create `
+$rawJson = scw instance server create `
     type=$InstanceType `
     image=$Image `
     zone=$Zone `
     name=$InstanceName `
     ip=new `
-    -o json | ConvertFrom-Json
+    -o json 2>&1
+
+# Verifier si la creation a echoue
+$ServerJson = $null
+try {
+    $ServerJson = $rawJson | ConvertFrom-Json
+} catch {
+    Log-Error "Echec de la creation de l'instance :"
+    Write-Host $rawJson
+    exit 1
+}
+
+if ($ServerJson.error -or -not $ServerJson.id) {
+    Log-Error "Echec de la creation de l'instance :"
+    Write-Host $rawJson
+    Write-Host ""
+    Log-Info "Listez les types GPU disponibles avec :"
+    Write-Host "  scw instance server-type list zone=$Zone"
+    exit 1
+}
 
 $ServerId = $ServerJson.id
 Log-Ok "Instance creee: $ServerId"
