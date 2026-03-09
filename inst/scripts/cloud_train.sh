@@ -30,6 +30,70 @@
 
 set -euo pipefail
 
+# --- Notifications (email + webhook) ---
+NOTIFY_EMAIL="${NOTIFY_EMAIL:-}"
+NOTIFY_WEBHOOK="${NOTIFY_WEBHOOK:-}"
+
+# Fonction generique d'envoi de notification
+# Usage : send_notification "sujet" "message court" "corps email detaille"
+send_notification() {
+    local SUBJECT="$1"
+    local SHORT_MSG="$2"
+    local BODY="${3:-$SHORT_MSG}"
+
+    # --- Email ---
+    if [ -n "$NOTIFY_EMAIL" ]; then
+        echo "  -> Envoi email a $NOTIFY_EMAIL"
+        python3 -c "
+import smtplib
+from email.mime.text import MIMEText
+import socket
+
+hostname = socket.gethostname()
+body = '''$BODY'''
+
+msg = MIMEText(body)
+msg['Subject'] = '$SUBJECT'
+msg['From'] = 'maestro@' + hostname
+msg['To'] = '$NOTIFY_EMAIL'
+
+try:
+    with smtplib.SMTP('localhost', 25, timeout=10) as s:
+        s.sendmail(msg['From'], ['$NOTIFY_EMAIL'], msg.as_string())
+    print('    Email envoye')
+except Exception as e:
+    print(f'    SMTP local echoue: {e}')
+    import subprocess
+    try:
+        p = subprocess.Popen(['/usr/sbin/sendmail', '-t'], stdin=subprocess.PIPE)
+        p.communicate(msg.as_string().encode())
+        print('    Email envoye via sendmail')
+    except Exception as e2:
+        print(f'    Echec sendmail: {e2}')
+" 2>&1 || echo "  (notification email echouee, non bloquant)"
+    fi
+
+    # --- Webhook ---
+    if [ -n "$NOTIFY_WEBHOOK" ]; then
+        echo "  -> Envoi webhook"
+        case "$NOTIFY_WEBHOOK" in
+            *ntfy.sh*|*ntfy/*)
+                curl -s -H "Title: $SUBJECT" -d "$SHORT_MSG" "$NOTIFY_WEBHOOK" 2>&1 || true
+                ;;
+            *hooks.slack.com*)
+                curl -s -X POST -H 'Content-type: application/json' \
+                    --data "{\"text\":\"*$SUBJECT*\n$SHORT_MSG\"}" "$NOTIFY_WEBHOOK" 2>&1 || true
+                ;;
+            *)
+                curl -s -X POST -H 'Content-type: application/json' \
+                    --data "{\"subject\":\"$SUBJECT\",\"text\":\"$SHORT_MSG\"}" \
+                    "$NOTIFY_WEBHOOK" 2>&1 || true
+                ;;
+        esac
+        echo "    Webhook envoye"
+    fi
+}
+
 echo "========================================================"
 echo " MAESTRO - Entrainement GPU sur Scaleway"
 echo " TreeSatAI -> 8 classes regroupees"
@@ -138,6 +202,32 @@ if [ -n "$UNFREEZE" ]; then
     UNFREEZE_FLAG="--unfreeze"
 fi
 
+# --- Notification de debut ---
+GPU_NAME=$($PYTHON -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')" 2>/dev/null || echo "inconnu")
+PUBLIC_IP=$(curl -s http://169.254.42.42/conf?format=json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('public_ip',{}).get('address','<IP_INSTANCE>'))" 2>/dev/null || echo "<IP_INSTANCE>")
+HOSTNAME=$(hostname)
+START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+
+send_notification \
+    "[MAESTRO] Entrainement demarre" \
+    "Entrainement lance sur $HOSTNAME ($PUBLIC_IP) - GPU: $GPU_NAME - $EPOCHS epochs, batch $BATCH_SIZE, lr $LR, modalites $MODALITES" \
+    "Bonjour,
+
+L'entrainement MAESTRO vient de demarrer.
+
+  - Instance : $HOSTNAME ($PUBLIC_IP)
+  - GPU      : $GPU_NAME
+  - Debut    : $START_TIME
+  - Epochs   : $EPOCHS
+  - Batch    : $BATCH_SIZE
+  - LR       : $LR
+  - Modalites: $MODALITES
+
+Pour suivre en temps reel :
+  ssh -t root@${PUBLIC_IP} 'tmux attach -t maestro'
+
+Vous recevrez une notification quand ce sera termine."
+
 # Adapter le nombre de workers au nombre de CPUs
 N_WORKERS=$(nproc --ignore=2 2>/dev/null || echo 4)
 N_WORKERS=$((N_WORKERS > 8 ? 8 : N_WORKERS))
@@ -165,7 +255,6 @@ echo "Modeles sauvegardes :"
 ls -lh "$OUTPUT_DIR"/*.pt 2>/dev/null || echo "  (aucun modele trouve)"
 echo ""
 echo "Pour recuperer le modele sur ton PC :"
-PUBLIC_IP=$(curl -s http://169.254.42.42/conf?format=json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('public_ip',{}).get('address','<IP_INSTANCE>'))" 2>/dev/null || echo "<IP_INSTANCE>")
 echo "  scp root@${PUBLIC_IP}:$OUTPUT_DIR/maestro_treesatai_best.pt ."
 echo ""
 echo "Puis predire sur votre AOI :"
@@ -179,23 +268,22 @@ echo "  scw instance server terminate <SERVER_ID>"
 # Creer un fichier flag pour indiquer la fin de l'entrainement
 touch ~/TRAINING_DONE
 
-# --- Notification par email ---
-NOTIFY_EMAIL="${NOTIFY_EMAIL:-}"
-if [ -n "$NOTIFY_EMAIL" ]; then
-    echo "=== Envoi de la notification par email ==="
-    BEST_MODEL=$(ls -1 "$OUTPUT_DIR"/maestro_treesatai_best.pt 2>/dev/null && echo "oui" || echo "non")
-    $PYTHON -c "
-import smtplib
-from email.mime.text import MIMEText
-import socket
+# --- Notification de fin ---
+END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+BEST_MODEL=$(ls -1 "$OUTPUT_DIR"/maestro_treesatai_best.pt 2>/dev/null && echo "oui" || echo "non")
+DUREE=$((SECONDS / 60))
 
-hostname = socket.gethostname()
-ip = '${PUBLIC_IP}'
-body = '''Bonjour,
+send_notification \
+    "[MAESTRO] Entrainement termine !" \
+    "Entrainement termine sur $HOSTNAME ($PUBLIC_IP) - Duree: ${DUREE}min - $EPOCHS epochs - Modele: $BEST_MODEL" \
+    "Bonjour,
 
-L'entrainement MAESTRO est termine sur l'instance $hostname ($ip).
+L'entrainement MAESTRO est termine !
 
-  - Date     : $TIMESTAMP
+  - Instance : $HOSTNAME ($PUBLIC_IP)
+  - Debut    : $START_TIME
+  - Fin      : $END_TIME
+  - Duree    : ${DUREE} minutes
   - Epochs   : $EPOCHS
   - Modele   : $BEST_MODEL
   - Sortie   : $OUTPUT_DIR
@@ -204,54 +292,4 @@ Pour recuperer le modele :
   scp root@${PUBLIC_IP}:$OUTPUT_DIR/maestro_treesatai_best.pt .
 
 IMPORTANT : Pensez a supprimer l'instance Scaleway !
-'''
-
-msg = MIMEText(body)
-msg['Subject'] = '[MAESTRO] Entrainement termine - ' + hostname
-msg['From'] = 'maestro@' + hostname
-msg['To'] = '$NOTIFY_EMAIL'
-
-try:
-    with smtplib.SMTP('localhost', 25, timeout=10) as s:
-        s.sendmail(msg['From'], ['$NOTIFY_EMAIL'], msg.as_string())
-    print('Email envoye a $NOTIFY_EMAIL')
-except Exception as e:
-    print(f'Impossible d envoyer par SMTP local: {e}')
-    print('Tentative via sendmail...')
-    import subprocess
-    try:
-        p = subprocess.Popen(['/usr/sbin/sendmail', '-t'], stdin=subprocess.PIPE)
-        p.communicate(msg.as_string().encode())
-        print('Email envoye via sendmail')
-    except Exception as e2:
-        print(f'Echec sendmail: {e2}')
-        print('Alternative: installez msmtp ou utilisez un webhook.')
-" 2>&1 || echo "  (notification email echouee, non bloquant)"
-fi
-
-# --- Notification par webhook (ntfy.sh, Slack, etc.) ---
-NOTIFY_WEBHOOK="${NOTIFY_WEBHOOK:-}"
-if [ -n "$NOTIFY_WEBHOOK" ]; then
-    echo "=== Envoi de la notification par webhook ==="
-    HOSTNAME=$(hostname)
-    MESSAGE="Entrainement MAESTRO termine sur $HOSTNAME ($PUBLIC_IP) - $TIMESTAMP - Epochs: $EPOCHS"
-    # Detecter le type de webhook
-    case "$NOTIFY_WEBHOOK" in
-        *ntfy.sh*|*ntfy/*)
-            # ntfy.sh : notification push gratuite (mobile + desktop)
-            curl -s -d "$MESSAGE" "$NOTIFY_WEBHOOK" 2>&1 || true
-            ;;
-        *hooks.slack.com*)
-            # Slack webhook
-            curl -s -X POST -H 'Content-type: application/json' \
-                --data "{\"text\":\"$MESSAGE\"}" "$NOTIFY_WEBHOOK" 2>&1 || true
-            ;;
-        *)
-            # Webhook generique (POST avec JSON)
-            curl -s -X POST -H 'Content-type: application/json' \
-                --data "{\"text\":\"$MESSAGE\",\"status\":\"done\",\"epochs\":$EPOCHS}" \
-                "$NOTIFY_WEBHOOK" 2>&1 || true
-            ;;
-    esac
-    echo "Notification webhook envoyee"
-fi
+  scw instance server terminate <SERVER_ID>"
