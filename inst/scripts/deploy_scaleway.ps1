@@ -37,6 +37,7 @@ param(
     [int]$BatchSize = 64,
     [string]$LR = "1e-3",
     [string]$Modalites = "aerial",
+    [int]$DataVolumeGB = 100,
     [switch]$Unfreeze,
     [switch]$DryRun
 )
@@ -63,6 +64,7 @@ Write-Host "  Epochs        : $Epochs"
 Write-Host "  Batch size    : $BatchSize"
 Write-Host "  Learning rate : $LR"
 Write-Host "  Modalites     : $Modalites"
+Write-Host "  Volume data   : ${DataVolumeGB} Go"
 Write-Host "  Unfreeze      : $(if ($Unfreeze) { 'oui' } else { 'non' })"
 Write-Host ""
 
@@ -153,13 +155,14 @@ if ($existingServers -and $existingServers.Count -gt 0) {
         scw instance server action run $ServerId zone=$Zone 2>&1 | Out-Null
     }
 } else {
-    Log-Info "Creation de l'instance $InstanceType..."
+    Log-Info "Creation de l'instance $InstanceType avec volume data ${DataVolumeGB}Go..."
     $rawJson = scw instance server create `
         type=$InstanceType `
         image=$Image `
         zone=$Zone `
         name=$InstanceName `
         ip=new `
+        additional-volumes.0=block:${DataVolumeGB}GB `
         -o json 2>&1
 
     # Verifier si la creation a echoue
@@ -299,6 +302,15 @@ if (-not $sshTestOk) {
     Log-Warn "  ssh root@$PublicIP"
 }
 
+# --- Etape 3b : Monter le volume data ---
+Write-Host ""
+Log-Info "=== Etape 3b : Montage du volume data ==="
+Log-Info "Formatage et montage du volume data sur /data..."
+# Le volume additionnel apparait comme /dev/vdb sur Scaleway
+# On le formate en ext4 (seulement s'il n'est pas deja formate) et on le monte sur /data
+# Note : les $ dans les commandes bash sont echappes avec ` pour PowerShell
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "set -e; for i in `$(seq 1 30); do [ -b /dev/vdb ] && break; sleep 1; done; if [ ! -b /dev/vdb ]; then echo ERREUR_DEVICE; lsblk; exit 1; fi; blkid /dev/vdb | grep -q ext4 || mkfs.ext4 -q /dev/vdb; mkdir -p /data; mount /dev/vdb /data; df -h /data"
+
 # --- Etape 4 : Deployer et lancer l'entrainement ---
 Write-Host ""
 Log-Info "=== Etape 4 : Deploiement de l'entrainement ==="
@@ -354,7 +366,7 @@ Write-Host ""
 Write-Host "--- Commandes utiles ---"
 Write-Host ""
 Write-Host "  # Suivre l'entrainement en temps reel :"
-Write-Host "  ssh root@$PublicIP 'tmux attach -t maestro'"
+Write-Host "  ssh -t root@$PublicIP 'tmux attach -t maestro'"
 Write-Host ""
 Write-Host "  # Voir les logs :"
 Write-Host "  ssh root@$PublicIP 'tail -f ~/train.log'"
@@ -362,8 +374,11 @@ Write-Host ""
 Write-Host "  # Verifier la GPU :"
 Write-Host "  ssh root@$PublicIP 'nvidia-smi'"
 Write-Host ""
+Write-Host "  # Verifier l'espace disque :"
+Write-Host "  ssh root@$PublicIP 'df -h /data'"
+Write-Host ""
 Write-Host "  # Recuperer le modele entraine :"
-Write-Host "  scp root@${PublicIP}:~/maestro_nemeton/outputs/training/maestro_treesatai_best.pt ."
+Write-Host "  scp root@${PublicIP}:/data/outputs/training/maestro_treesatai_best.pt ."
 Write-Host ""
 Write-Host "  # Ou utiliser le script de recuperation :"
 Write-Host "  .\inst\scripts\recover_model.ps1"

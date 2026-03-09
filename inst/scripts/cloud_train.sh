@@ -38,8 +38,14 @@ echo ""
 REPO_URL="https://github.com/pobsteta/maestro_nemeton.git"
 BRANCH="${BRANCH:-main}"
 WORK_DIR="$HOME/maestro_nemeton"
-DATA_DIR="${DATA_DIR:-$WORK_DIR/data/treesatai}"
-OUTPUT_DIR="${OUTPUT_DIR:-$WORK_DIR/outputs/training}"
+# Utiliser /data si le volume data est monte pour eviter de remplir le disque root
+if [ -d /data ] && mountpoint -q /data 2>/dev/null; then
+    DATA_DIR="${DATA_DIR:-/data/treesatai}"
+    OUTPUT_DIR="${OUTPUT_DIR:-/data/outputs/training}"
+else
+    DATA_DIR="${DATA_DIR:-$WORK_DIR/data/treesatai}"
+    OUTPUT_DIR="${OUTPUT_DIR:-$WORK_DIR/outputs/training}"
+fi
 EPOCHS="${EPOCHS:-30}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 LR="${LR:-1e-3}"
@@ -71,7 +77,14 @@ if ! python3 -m venv "$VENV_TEST" 2>/dev/null; then
 fi
 rm -rf "$VENV_TEST"
 
-VENV_DIR="${VENV_DIR:-$HOME/venv_maestro}"
+# Utiliser /data si le volume data est monte, sinon $HOME
+if [ -d /data ] && mountpoint -q /data 2>/dev/null; then
+    DEFAULT_VENV="/data/venv_maestro"
+    echo "Volume data detecte sur /data - utilisation pour le venv et les donnees"
+else
+    DEFAULT_VENV="$HOME/venv_maestro"
+fi
+VENV_DIR="${VENV_DIR:-$DEFAULT_VENV}"
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi

@@ -117,7 +117,10 @@ if (-not (Test-Path $LocalDir)) {
 Write-Host ""
 Log-Info "=== Recuperation du modele ==="
 
-$RemoteDir = "~/maestro_nemeton/outputs/training"
+# Chercher le modele dans /data (volume) ou dans ~/maestro_nemeton (ancien chemin)
+$RemoteDir = ssh -o StrictHostKeyChecking=no "root@$PublicIP" "if [ -d /data/outputs/training ]; then echo /data/outputs/training; else echo ~/maestro_nemeton/outputs/training; fi"
+$RemoteDir = $RemoteDir.Trim()
+Log-Info "Repertoire distant : $RemoteDir"
 
 # Lister les fichiers disponibles
 Log-Info "Fichiers disponibles sur l'instance :"
