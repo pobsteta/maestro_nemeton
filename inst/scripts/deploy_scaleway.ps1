@@ -182,20 +182,29 @@ Log-Info "=== Etape 3 : Connexion SSH ==="
 Log-Info "Attente du serveur SSH..."
 
 $sshReady = $false
-for ($i = 1; $i -le 30; $i++) {
+$maxAttempts = 60  # 60 x 5s = 300s (5 minutes) - les GPU instances sont lentes a demarrer
+for ($i = 1; $i -le $maxAttempts; $i++) {
+    $result = $null
     try {
-        $result = ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "root@$PublicIP" "echo ok" 2>$null
-        if ($result -eq "ok") {
-            Log-Ok "SSH disponible"
-            $sshReady = $true
-            break
-        }
+        $result = ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes "root@$PublicIP" "echo ok" 2>$null
     } catch { }
-    if ($i -eq 30) {
-        Log-Error "Timeout SSH apres 150s"
-        exit 1
+    if ($result -eq "ok") {
+        Log-Ok "SSH disponible"
+        $sshReady = $true
+        break
+    }
+    if ($i % 6 -eq 0) {
+        Log-Info "  Toujours en attente du SSH... ($($i * 5)s/$($maxAttempts * 5)s)"
     }
     Start-Sleep -Seconds 5
+}
+
+if (-not $sshReady) {
+    Log-Error "Timeout SSH apres $($maxAttempts * 5)s"
+    Log-Info "L'instance est peut-etre encore en cours de demarrage."
+    Log-Info "Essayez manuellement : ssh root@$PublicIP"
+    Log-Info "Pour supprimer : scw instance server terminate $ServerId zone=$Zone with-ip=true"
+    exit 1
 }
 
 # --- Etape 4 : Deployer et lancer l'entrainement ---
