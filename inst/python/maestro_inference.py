@@ -350,9 +350,67 @@ def _install_maestro_stubs():
 # Chargement du modele
 # ---------------------------------------------------------------------------
 
+def _load_checkpoint_file(chemin, device):
+    """Charge un fichier checkpoint (.ckpt, .pt, .safetensors) et retourne le dict."""
+    if chemin.suffix == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+            return load_file(str(chemin), device=str(device))
+        except ImportError:
+            raise ImportError(
+                "Le package 'safetensors' est requis. "
+                "Installez-le avec : pip install safetensors"
+            )
+
+    # Installer les stubs pour le unpickle du checkpoint MAESTRO
+    _install_maestro_stubs()
+    # Charger avec retry (Windows: antivirus/HF cache peuvent verrouiller)
+    import io
+    import time as _time
+    last_err = None
+    for _attempt in range(5):
+        try:
+            with open(str(chemin), "rb") as f:
+                buffer = io.BytesIO(f.read())
+            checkpoint = torch.load(buffer, map_location=device,
+                                    weights_only=False)
+            last_err = None
+            break
+        except PermissionError as e:
+            last_err = e
+            wait = 2 ** _attempt  # 1, 2, 4, 8, 16 secondes
+            print("  [ATTENTION] Fichier verrouille, nouvelle tentative "
+                  "dans %ds (%d/5)..." % (wait, _attempt + 1))
+            _time.sleep(wait)
+    if last_err is not None:
+        raise PermissionError(
+            "Impossible d'ouvrir le checkpoint apres 5 tentatives: %s\n"
+            "Fermez les autres applications utilisant ce fichier "
+            "(antivirus, autre session R/Python)." % str(chemin)
+        ) from last_err
+    return checkpoint
+
+
+def _extract_state_dict(checkpoint):
+    """Extrait le state_dict d'un checkpoint (Lightning, custom, ou brut)."""
+    if isinstance(checkpoint, dict):
+        if "state_dict" in checkpoint:
+            return checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            return checkpoint["model"]
+        elif "model_state_dict" in checkpoint:
+            return checkpoint["model_state_dict"]
+        else:
+            return checkpoint
+    return checkpoint
+
+
 def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
     """
-    Charge le modele MAESTRO avec les poids pre-entraines.
+    Charge le modele MAESTRO avec les poids pre-entraines (backbone).
+
+    Le checkpoint est un .ckpt pre-entraine : seul le backbone est charge,
+    la tete de classification reste aleatoire.
 
     Args:
         chemin_poids: Chemin vers le fichier de poids (.ckpt, .pt, .pth, .safetensors)
@@ -405,55 +463,8 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
     )
 
     # Charger les poids
-    if chemin.suffix == ".safetensors":
-        try:
-            from safetensors.torch import load_file
-            state_dict = load_file(str(chemin), device=str(device))
-        except ImportError:
-            raise ImportError(
-                "Le package 'safetensors' est requis. "
-                "Installez-le avec : pip install safetensors"
-            )
-    else:
-        # Installer les stubs pour le unpickle du checkpoint MAESTRO
-        _install_maestro_stubs()
-        # Charger avec retry (Windows: antivirus/HF cache peuvent verrouiller)
-        import io
-        import time as _time
-        last_err = None
-        for _attempt in range(5):
-            try:
-                with open(str(chemin), "rb") as f:
-                    buffer = io.BytesIO(f.read())
-                checkpoint = torch.load(buffer, map_location=device,
-                                        weights_only=False)
-                last_err = None
-                break
-            except PermissionError as e:
-                last_err = e
-                wait = 2 ** _attempt  # 1, 2, 4, 8, 16 secondes
-                print("  [ATTENTION] Fichier verrouille, nouvelle tentative "
-                      "dans %ds (%d/5)..." % (wait, _attempt + 1))
-                _time.sleep(wait)
-        if last_err is not None:
-            raise PermissionError(
-                "Impossible d'ouvrir le checkpoint apres 5 tentatives: %s\n"
-                "Fermez les autres applications utilisant ce fichier "
-                "(antivirus, autre session R/Python)." % str(chemin)
-            ) from last_err
-
-        # Extraire le state_dict du checkpoint PyTorch Lightning
-        if isinstance(checkpoint, dict):
-            if "state_dict" in checkpoint:
-                state_dict = checkpoint["state_dict"]
-            elif "model" in checkpoint:
-                state_dict = checkpoint["model"]
-            elif "model_state_dict" in checkpoint:
-                state_dict = checkpoint["model_state_dict"]
-            else:
-                state_dict = checkpoint
-        else:
-            state_dict = checkpoint
+    checkpoint = _load_checkpoint_file(chemin, device)
+    state_dict = _extract_state_dict(checkpoint)
 
     # Filtrer: garder les cles pour les modalites selectionnees + encoder_inter
     prefixes_gardees = ["model.encoder_inter."]
@@ -494,6 +505,85 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
         device, format(n_params, ","), format(n_pretrained, ",")))
 
     return modele
+
+
+def charger_modele_finetune(chemin_poids, device="cpu", **kwargs):
+    """
+    Charge un modele MAESTRO fine-tune (backbone + tete entrainee).
+
+    Le checkpoint .pt contient le model_state_dict complet (backbone + head)
+    ainsi que les metadonnees (n_classes, classes, modalites).
+
+    Args:
+        chemin_poids: Chemin vers le .pt fine-tune
+        device: 'cpu' ou 'cuda'
+        modalites: Override des modalites (optionnel, sinon lu du checkpoint)
+
+    Returns:
+        dict avec 'modele' (PyTorch), 'n_classes', 'classes', 'modalites'
+    """
+    modalites = kwargs.get("modalites", None)
+    chemin = Path(chemin_poids)
+    device = torch.device(device)
+
+    checkpoint = _load_checkpoint_file(chemin, device)
+
+    # Extraire les metadonnees du checkpoint fine-tune
+    n_classes = checkpoint.get("n_classes", 8)
+    classes = checkpoint.get("classes", [])
+    ckpt_modalites = checkpoint.get("modalites", ["aerial"])
+
+    if modalites is None:
+        modalites = ckpt_modalites
+
+    state_dict = _extract_state_dict(checkpoint)
+
+    # Configuration MAESTRO medium
+    embed_dim = 768
+    encoder_depth = 9
+    inter_depth = 3
+    num_heads = 12
+
+    mod_config = {k: MODALITIES[k] for k in modalites if k in MODALITIES}
+    if not mod_config:
+        raise ValueError(
+            "Aucune modalite valide. Choix: %s" % list(MODALITIES.keys())
+        )
+
+    print("  Chargement modele fine-tune: %s" % chemin.name)
+    print("  Classes: %d (%s)" % (n_classes, ", ".join(classes)))
+    print("  Modalites: %s" % ", ".join(mod_config.keys()))
+
+    modele = MAESTROClassifier(
+        embed_dim=embed_dim,
+        encoder_depth=encoder_depth,
+        inter_depth=inter_depth,
+        num_heads=num_heads,
+        n_classes=n_classes,
+        modalities=mod_config,
+    )
+
+    # Charger TOUS les poids (backbone + head)
+    missing, unexpected = modele.load_state_dict(state_dict, strict=False)
+    if missing:
+        print("  [ATTENTION] Cles manquantes: %d" % len(missing))
+        for k in missing[:10]:
+            print("    - %s" % k)
+    if unexpected:
+        print("  [INFO] Cles inattendues (ignorees): %d" % len(unexpected))
+
+    modele = modele.to(device)
+    modele.eval()
+    n_params = sum(p.numel() for p in modele.parameters())
+    print("  Modele fine-tune charge sur %s (%s parametres)" % (
+        device, format(n_params, ",")))
+
+    return {
+        "modele": modele,
+        "n_classes": n_classes,
+        "classes": classes,
+        "modalites": list(mod_config.keys()),
+    }
 
 
 # ---------------------------------------------------------------------------

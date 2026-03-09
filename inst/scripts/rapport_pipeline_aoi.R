@@ -4,7 +4,7 @@
 # Rapport graphique du pipeline MAESTRO avec patchwork
 #
 # Genere un rapport PDF et un affichage RStudio des donnees produites
-# par test_pipeline_aoi.R (repertoire outputs/).
+# par le pipeline MAESTRO (repertoire outputs/).
 #
 # Utilisation :
 #   source("inst/scripts/rapport_pipeline_aoi.R")
@@ -49,7 +49,7 @@ fichiers_presents <- file.exists(file.path(dossier_test, fichiers_requis))
 if (!all(fichiers_presents)) {
   manquants <- fichiers_requis[!fichiers_presents]
   stop("Fichiers manquants dans outputs/ : ", paste(manquants, collapse = ", "),
-       "\nExecutez d'abord : source('inst/scripts/test_pipeline_aoi.R')")
+       "\nExecutez d'abord le pipeline MAESTRO pour generer les fichiers de sortie.")
 }
 
 message("\n========================================================")

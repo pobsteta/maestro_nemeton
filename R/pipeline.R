@@ -12,6 +12,10 @@
 #' @param output_dir Repertoire de sortie (defaut: `"outputs"`)
 #' @param model_id Identifiant du modele Hugging Face
 #'   (defaut: `"IGNF/MAESTRO_FLAIR-HUB_base"`)
+#' @param checkpoint Chemin vers un modele fine-tune (.pt). Si fourni,
+#'   utilise ce modele au lieu du pretrained MAESTRO. Le nombre de classes
+#'   et les essences sont lus du checkpoint.
+#'   Ex: `"outputs/training/maestro_treesatai_best.pt"`
 #' @param millesime_ortho Millesime de l'ortho RVB (`NULL` = plus recent)
 #' @param millesime_irc Millesime de l'ortho IRC (`NULL` = plus recent)
 #' @param patch_size Taille des patches en pixels (defaut: 250)
@@ -22,26 +26,34 @@
 #' @export
 #' @examples
 #' \dontrun{
-#' # Millesime par defaut
+#' # PureForest (13 classes, modele pretrained)
 #' maestro_pipeline("data/aoi.gpkg")
 #'
-#' # Millesime specifique
+#' # TreeSatAI (8 classes, modele fine-tune)
 #' maestro_pipeline("data/aoi.gpkg",
-#'                   millesime_ortho = 2023,
-#'                   millesime_irc = 2023)
+#'                   checkpoint = "outputs/training/maestro_treesatai_best.pt")
 #' }
 maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               output_dir = "outputs",
                               model_id = "IGNF/MAESTRO_FLAIR-HUB_base",
+                              checkpoint = NULL,
                               millesime_ortho = NULL,
                               millesime_irc = NULL,
                               patch_size = 250L,
                               resolution = 0.2,
                               gpu = FALSE,
                               token = NULL) {
+  # Determiner le mode: fine-tune ou pretrained
+  is_finetune <- !is.null(checkpoint)
+
   message("========================================================")
-  message(" MAESTRO - Reconnaissance des essences forestieres")
-  message(" Modele IGNF multi-modal (aerial + DEM)")
+  if (is_finetune) {
+    message(" MAESTRO - Reconnaissance des essences forestieres")
+    message(sprintf(" Modele fine-tune: %s", basename(checkpoint)))
+  } else {
+    message(" MAESTRO - Reconnaissance des essences forestieres")
+    message(" Modele IGNF multi-modal (aerial + DEM)")
+  }
   message(" Donnees ortho + DEM via Geoplateforme IGN (WMS-R)")
   message("========================================================\n")
 
@@ -88,8 +100,8 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                      terra::nlyr(modalites[[mod_name]])))
   }
 
-  # 6. Telecharger le modele
-  fichiers_modele <- telecharger_modele(model_id, token)
+  # 6. Telecharger le modele (sauf si checkpoint fine-tune fourni)
+  fichiers_modele <- if (is_finetune) NULL else telecharger_modele(model_id, token)
 
   # 7. Configurer Python
   configurer_python()
@@ -102,15 +114,26 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
   patches_multimodal <- extraire_patches_multimodal(modalites, grille, patch_size)
 
   # 10. Inference multi-modale
-  predictions <- executer_inference_multimodal(
-    patches_multimodal, fichiers_modele,
-    n_classes = 13L,
-    modalites = modalites_noms,
-    utiliser_gpu = gpu
-  )
+  if (is_finetune) {
+    predictions <- executer_inference_multimodal(
+      patches_multimodal, fichiers_modele = NULL,
+      modalites = modalites_noms,
+      utiliser_gpu = gpu,
+      checkpoint = checkpoint
+    )
+  } else {
+    predictions <- executer_inference_multimodal(
+      patches_multimodal, fichiers_modele,
+      n_classes = 13L,
+      modalites = modalites_noms,
+      utiliser_gpu = gpu
+    )
+  }
 
   # 11. Assembler et exporter
+  essences <- if (is_finetune) essences_treesatai() else essences_pureforest()
   resultats <- assembler_resultats(grille, predictions,
+                                    essences = essences,
                                     dossier_sortie = output_dir)
 
   # 12. Carte raster

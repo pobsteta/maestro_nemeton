@@ -50,3 +50,45 @@ essences_pureforest <- function() {
     stringsAsFactors = FALSE
   )
 }
+
+#' Classes d'essences forestieres TreeSatAI (8 classes regroupees)
+#'
+#' Table des 8 classes d'essences regroupees a partir du jeu de donnees
+#' TreeSatAI (15 genres). Utilise pour le fine-tuning MAESTRO sur TreeSatAI.
+#'
+#' @return Un data.frame avec les colonnes code, classe, nom_latin et type
+#' @export
+#' @examples
+#' ess <- essences_treesatai()
+#' ess[ess$type == "feuillu", ]
+essences_treesatai <- function() {
+  data.frame(
+    code = 0:7,
+    classe = c(
+      "Chenes",
+      "Hetre",
+      "Autres feuillus",
+      "Pins",
+      "Epicea/Sapin",
+      "Douglas",
+      "Meleze",
+      "Cleared"
+    ),
+    nom_latin = c(
+      "Quercus spp.",
+      "Fagus sylvatica",
+      "Mixed broadleaves",
+      "Pinus spp.",
+      "Picea abies / Abies alba",
+      "Pseudotsuga menziesii",
+      "Larix spp.",
+      "Cleared land"
+    ),
+    type = c(
+      "feuillu", "feuillu", "feuillu",
+      "resineux", "resineux", "resineux", "resineux",
+      "autre"
+    ),
+    stringsAsFactors = FALSE
+  )
+}

@@ -2,11 +2,16 @@
 ^\.Rproj\.user$
 ^\.git$
 ^\.gitignore$
+^\.Renviron$
+^\.Rprofile$
 ^LICENSE\.md$
 ^README\.Rmd$
 ^maestro_essences\.R$
 ^maestro_inference\.py$
 ^creer_aoi_exemple\.R$
+^test_checkpoint.*\.py$
+^test_load_model\.py$
+^test_pipeline\.R$
 ^data$
 ^outputs$
 ^resultats$

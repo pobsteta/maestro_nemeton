@@ -77,15 +77,14 @@ configurer_python <- function(envname = CONDA_ENV) {
     }
   }
 
-  library(reticulate)
-  use_condaenv(envname, required = TRUE)
+  reticulate::use_condaenv(envname, required = TRUE)
   message("Environnement conda configure: ", envname)
 
   # Verifier les modules disponibles
   modules <- c("torch", "numpy", "safetensors")
   ok <- TRUE
   for (mod in modules) {
-    avail <- py_module_available(mod)
+    avail <- reticulate::py_module_available(mod)
     message(sprintf("  Python %s: %s", mod, ifelse(avail, "OK", "MANQUANT")))
     if (!avail) ok <- FALSE
   }
@@ -219,7 +218,8 @@ executer_inference_multimodal <- function(patches_multimodal, fichiers_modele,
                                            n_classes = 13L,
                                            modalites = c("aerial", "dem"),
                                            utiliser_gpu = FALSE,
-                                           batch_size = 16L) {
+                                           batch_size = 16L,
+                                           checkpoint = NULL) {
   message("=== Inference MAESTRO multi-modale ===")
   message(sprintf("  Modalites: %s", paste(modalites, collapse = " + ")))
 
@@ -237,17 +237,29 @@ executer_inference_multimodal <- function(patches_multimodal, fichiers_modele,
     "cpu"
   }
 
-  chemin_poids <- fichiers_modele$weights %||% fichiers_modele$snapshot
-  if (is.null(chemin_poids)) {
-    stop("Impossible de trouver les poids du modele.")
+  # Deux modes: checkpoint fine-tune (.pt) ou pretrained (.ckpt)
+  if (!is.null(checkpoint)) {
+    message("  Chargement du modele fine-tune: ", basename(checkpoint))
+    result <- maestro$charger_modele_finetune(
+      chemin_poids = checkpoint,
+      device = device_str,
+      modalites = as.list(modalites)
+    )
+    modele <- result$modele
+    n_classes <- as.integer(result$n_classes)
+    message(sprintf("  %d classes detectees dans le checkpoint", n_classes))
+  } else {
+    chemin_poids <- fichiers_modele$weights %||% fichiers_modele$snapshot
+    if (is.null(chemin_poids)) {
+      stop("Impossible de trouver les poids du modele.")
+    }
+    modele <- maestro$charger_modele(
+      chemin_poids = chemin_poids,
+      n_classes = as.integer(n_classes),
+      device = device_str,
+      modalites = as.list(modalites)
+    )
   }
-
-  modele <- maestro$charger_modele(
-    chemin_poids = chemin_poids,
-    n_classes = as.integer(n_classes),
-    device = device_str,
-    modalites = as.list(modalites)
-  )
 
   message("  Lancement de l'inference multi-modale...")
   n_patches <- length(patches_multimodal)
