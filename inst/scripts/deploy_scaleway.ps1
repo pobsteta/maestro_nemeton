@@ -98,7 +98,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 
 # Verifier que scw est configure
 try {
-    $null = scw account ssh list-keys 2>$null
+    $null = scw info 2>$null
     Log-Ok "CLI Scaleway configuree"
 } catch {
     Log-Error "CLI Scaleway non configuree. Executez : scw init"
