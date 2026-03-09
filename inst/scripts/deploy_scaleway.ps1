@@ -97,13 +97,12 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 
 # Verifier que scw est configure
-try {
-    $null = scw info 2>$null
-    Log-Ok "CLI Scaleway configuree"
-} catch {
+$scwOutput = scw info 2>&1
+if ($LASTEXITCODE -ne 0) {
     Log-Error "CLI Scaleway non configuree. Executez : scw init"
     exit 1
 }
+Log-Ok "CLI Scaleway configuree"
 
 # --- Mode dry-run ---
 if ($DryRun) {
