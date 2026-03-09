@@ -321,10 +321,22 @@ $UnfreezeVal = $(if ($Unfreeze) { "1" } else { "" })
 # Lancer l'entrainement dans tmux
 # Note : eviter les here-strings PowerShell (@"..."@) car elles envoient des CRLF via SSH
 Log-Info "Installation de tmux sur l'instance..."
-ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1"
+# Note : utiliser `$null pour echapper le $ PowerShell dans /dev/null
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "apt-get update -qq && apt-get install -y -qq tmux > /dev/`$null 2>&1"
 
 Log-Info "Lancement de l'entrainement dans tmux..."
-ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux new-session -d -s maestro 'export EPOCHS=$Epochs; export BATCH_SIZE=$BatchSize; export LR=$LR; export MODALITES=$Modalites; export UNFREEZE=$UnfreezeVal; bash ~/cloud_train.sh 2>&1 | tee ~/train.log'"
+$TmuxCmd = "export EPOCHS=$Epochs; export BATCH_SIZE=$BatchSize; export LR=$LR; export MODALITES=$Modalites; export UNFREEZE=$UnfreezeVal; bash ~/cloud_train.sh 2>&1 | tee ~/train.log"
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux new-session -d -s maestro '$TmuxCmd'"
+
+# Verifier que la session tmux existe
+Start-Sleep -Seconds 2
+$tmuxCheck = ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux has-session -t maestro 2>&1 && echo tmux_ok || echo tmux_fail"
+if ($tmuxCheck -notmatch "tmux_ok") {
+    Log-Error "La session tmux n'a pas demarre. Diagnostic :"
+    ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "which tmux; tmux list-sessions 2>&1; cat ~/train.log 2>/dev/null | head -20"
+    Log-Warn "Tentative de lancement direct (sans tmux)..."
+    ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "nohup bash -c '$TmuxCmd' > ~/train.log 2>&1 &"
+}
 
 Log-Ok "Entrainement lance en arriere-plan (tmux session: maestro)"
 
