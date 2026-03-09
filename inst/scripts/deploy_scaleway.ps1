@@ -277,7 +277,9 @@ Log-Info "Test de connexion SSH..."
 $sshTestOk = $false
 for ($i = 1; $i -le 5; $i++) {
     try {
-        $result = (ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "root@$PublicIP" "echo maestro_ready" 2>&1) | Out-String
+        # -n : pas de lecture stdin (empeche le blocage dans PowerShell)
+        # -T : pas d'allocation de pseudo-terminal
+        $result = (ssh -n -T -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "root@$PublicIP" "echo maestro_ready" 2>&1) | Out-String
         if ($result -match "maestro_ready") {
             Log-Ok "Connexion SSH verifiee"
             $sshTestOk = $true
