@@ -57,6 +57,12 @@ cd "$WORK_DIR"
 echo ""
 echo "=== Installation des dependances Python ==="
 
+# Installer python3-venv si necessaire (absent sur les images GPU Scaleway)
+if ! python3 -m venv --help > /dev/null 2>&1; then
+    echo "Installation de python3-venv..."
+    apt-get update -qq && apt-get install -y -qq python3-venv > /dev/null 2>&1
+fi
+
 VENV_DIR="${VENV_DIR:-$HOME/venv_maestro}"
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"

@@ -319,11 +319,12 @@ ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "sed -i 's/\r$//' ~/clo
 $UnfreezeVal = $(if ($Unfreeze) { "1" } else { "" })
 
 # Lancer l'entrainement dans tmux
+# Note : eviter les here-strings PowerShell (@"..."@) car elles envoient des CRLF via SSH
+Log-Info "Installation de tmux sur l'instance..."
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1"
+
 Log-Info "Lancement de l'entrainement dans tmux..."
-ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" @"
-apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
-tmux new-session -d -s maestro "export EPOCHS=$Epochs; export BATCH_SIZE=$BatchSize; export LR=$LR; export MODALITES=$Modalites; export UNFREEZE=$UnfreezeVal; bash ~/cloud_train.sh 2>&1 | tee ~/train.log"
-"@
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux new-session -d -s maestro 'export EPOCHS=$Epochs; export BATCH_SIZE=$BatchSize; export LR=$LR; export MODALITES=$Modalites; export UNFREEZE=$UnfreezeVal; bash ~/cloud_train.sh 2>&1 | tee ~/train.log'"
 
 Log-Ok "Entrainement lance en arriere-plan (tmux session: maestro)"
 
