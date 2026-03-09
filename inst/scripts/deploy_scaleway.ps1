@@ -225,7 +225,11 @@ Log-Info "=== Etape 3 : Connexion SSH ==="
 
 # Supprimer l'ancienne cle SSH pour cette IP (evite l'erreur "host key changed")
 Log-Info "Nettoyage des anciennes cles SSH pour $PublicIP..."
-ssh-keygen -R $PublicIP 2>&1 | Out-Null
+try {
+    $sshKeygenOutput = ssh-keygen -R $PublicIP 2>&1
+} catch {
+    # Ignorer : l'hote n'est peut-etre pas dans known_hosts
+}
 
 Log-Info "Attente du serveur SSH..."
 
