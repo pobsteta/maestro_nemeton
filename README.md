@@ -247,6 +247,53 @@ Les donnees sont telechargees via le WMS-R de la Geoplateforme IGN :
 Code de telechargement adapte de
 [pobsteta/flair_hub_nemeton](https://github.com/pobsteta/flair_hub_nemeton).
 
+## Entrainement GPU sur Scaleway
+
+Le package inclut des scripts pour entrainer un modele fine-tune (TreeSatAI,
+8 classes) sur une instance GPU Scaleway.
+
+### Deploiement depuis Windows (PowerShell)
+
+```powershell
+# Pre-requis : CLI Scaleway (scw init) + OpenSSH
+
+# Test a blanc (voir les commandes sans executer)
+.\inst\scripts\deploy_scaleway.ps1 -DryRun
+
+# Lancer avec un GPU RTX 3070 (defaut, ~2 EUR pour 30 epochs)
+.\inst\scripts\deploy_scaleway.ps1
+
+# Avec un GPU L4 pour le multi-modal
+.\inst\scripts\deploy_scaleway.ps1 -InstanceType L4-1-24G -Epochs 50
+
+# Recuperer le modele entraine
+.\inst\scripts\recover_model.ps1
+
+# Ou avec l'IP directement
+.\inst\scripts\recover_model.ps1 -IP 51.15.x.x
+```
+
+### Deploiement depuis Linux/macOS (Bash)
+
+```bash
+# Test a blanc
+bash inst/scripts/deploy_scaleway.sh --dry-run
+
+# Lancer l'entrainement
+bash inst/scripts/deploy_scaleway.sh
+
+# Recuperer le modele
+bash inst/scripts/recover_model.sh
+```
+
+### Prediction apres entrainement
+
+```bash
+Rscript inst/scripts/predict_from_checkpoint.R \
+    --aoi data/aoi.gpkg \
+    --checkpoint outputs/training/maestro_treesatai_best.pt
+```
+
 ## References
 
 - **MAESTRO** : *MAESTRO: Masked AutoEncoders for Multimodal, Multitemporal,
