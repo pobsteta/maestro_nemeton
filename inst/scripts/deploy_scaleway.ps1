@@ -277,15 +277,18 @@ Log-Info "Test de connexion SSH..."
 $sshTestOk = $false
 for ($i = 1; $i -le 5; $i++) {
     try {
-        # -n : pas de lecture stdin (empeche le blocage dans PowerShell)
-        # -T : pas d'allocation de pseudo-terminal
-        $result = (ssh -n -T -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o "UserKnownHostsFile=NUL" "root@$PublicIP" "echo maestro_ready" 2>&1) | Out-String
+        # Utiliser les memes options que la connexion manuelle (qui fonctionne)
+        # -o StrictHostKeyChecking=accept-new : accepter les nouvelles cles sans prompt
+        $result = (ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "root@$PublicIP" "echo maestro_ready" 2>&1) | Out-String
+        Log-Info "  SSH tentative $i - reponse: $($result.Trim())"
         if ($result -match "maestro_ready") {
             Log-Ok "Connexion SSH verifiee"
             $sshTestOk = $true
             break
         }
-    } catch { }
+    } catch {
+        Log-Info "  SSH tentative $i - exception: $_"
+    }
     Log-Info "  Tentative SSH $i/5 echouee, nouvel essai dans 10s..."
     Start-Sleep -Seconds 10
 }
