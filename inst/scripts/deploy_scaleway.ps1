@@ -108,7 +108,10 @@ param(
     [switch]$DryRun
 )
 
-$ErrorActionPreference = "Stop"
+# Note : "Continue" (pas "Stop") car les CLI externes (scw, ssh) ecrivent souvent
+# des warnings sur stderr, que PowerShell traiterait comme des erreurs fatales.
+# On utilise $LASTEXITCODE pour detecter les vrais echecs.
+$ErrorActionPreference = "Continue"
 
 # --- Couleurs ---
 function Log-Info  { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Blue }
