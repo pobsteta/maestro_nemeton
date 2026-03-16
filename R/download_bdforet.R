@@ -431,7 +431,8 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
       label_dir <- file.path(flair_dir, "labels_ndp0")
     }
 
-    tif_files <- list.files(patch_dir, pattern = "\\.tif$", full.names = TRUE)
+    tif_files <- list.files(patch_dir, pattern = "\\.tif$", full.names = TRUE,
+                            recursive = TRUE)
     if (length(tif_files) == 0) next
 
     dir.create(label_dir, recursive = TRUE, showWarnings = FALSE)
