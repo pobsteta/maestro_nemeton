@@ -52,6 +52,22 @@ essences_pureforest <- function() {
 }
 
 
+#' Les 20 genres d'arbres du dataset TreeSatAI
+#'
+#' Retourne le vecteur des 20 genres d'arbres europeens presents dans
+#' le TreeSatAI Benchmark Archive. Utilise en interne pour le telechargement
+#' et l'organisation des donnees.
+#'
+#' @return Vecteur character de 20 noms de genres
+#' @export
+treesatai_species <- function() {
+  c("Abies", "Acer", "Alnus", "Betula", "Carpinus",
+    "Castanea", "Fagus", "Fraxinus", "Larix", "Picea",
+    "Pinus", "Populus", "Prunus", "Pseudotsuga", "Quercus",
+    "Robinia", "Salix", "Sorbus", "Taxus", "Tilia")
+}
+
+
 #' Classes d'essences forestieres TreeSatAI (7 classes)
 #'
 #' Table des 7 classes regroupees pour le fine-tuning sur TreeSatAI.

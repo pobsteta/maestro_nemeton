@@ -160,6 +160,19 @@ extraire_patches_multimodal <- function(modalites, grille, taille_pixels = 250) 
   message("=== Extraction des patches multi-modaux ===")
   message(sprintf("  Modalites: %s", paste(names(modalites), collapse = ", ")))
 
+  # Validation CRS : toutes les modalites doivent avoir le meme CRS
+  if (length(modalites) > 1) {
+    ref_crs <- terra::crs(modalites[[1]], proj = TRUE)
+    for (mod_name in names(modalites)[-1]) {
+      mod_crs <- terra::crs(modalites[[mod_name]], proj = TRUE)
+      if (mod_crs != ref_crs) {
+        stop(sprintf(
+          "CRS incoherent: '%s' a CRS='%s' mais '%s' a CRS='%s'. Reprojetez d'abord.",
+          names(modalites)[1], ref_crs, mod_name, mod_crs))
+      }
+    }
+  }
+
   # Afficher la taille de patch pour chaque modalite
   for (mod_name in names(modalites)) {
     tp <- taille_patch_modalite(mod_name, taille_pixels)

@@ -80,6 +80,39 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               max_scenes_par_annee = 3L,
                               gpu = FALSE,
                               token = NULL) {
+  # --- Validation des entrees ---
+  # Checkpoint fine-tune
+  if (!is.null(checkpoint)) {
+    if (!file.exists(checkpoint)) {
+      stop(sprintf("Checkpoint introuvable: %s", checkpoint))
+    }
+    if (!grepl("\\.(pt|pth|ckpt|safetensors)$", checkpoint, ignore.case = TRUE)) {
+      stop("Le checkpoint doit etre un fichier .pt, .pth, .ckpt ou .safetensors")
+    }
+    fsize <- file.size(checkpoint)
+    if (fsize < 1000) {
+      stop(sprintf("Checkpoint trop petit (%d octets) - fichier corrompu ?", fsize))
+    }
+  }
+
+  # Modalites valides
+  valid_modalities <- c("aerial", "dem", "s2", "s1_asc", "s1_des", "spot")
+  if (use_s1 && use_s2) {
+    expected_mods <- c("aerial", "dem", "s2", "s1_asc", "s1_des")
+  } else if (use_s2) {
+    expected_mods <- c("aerial", "dem", "s2")
+  } else if (use_s1) {
+    expected_mods <- c("aerial", "dem", "s1_asc", "s1_des")
+  } else {
+    expected_mods <- c("aerial", "dem")
+  }
+  message(sprintf("  Modalites attendues: %s", paste(expected_mods, collapse = ", ")))
+
+  # AOI
+  if (!file.exists(aoi_path)) {
+    stop(sprintf("Fichier AOI introuvable: %s", aoi_path))
+  }
+
   # Determiner le mode: fine-tune ou pretrained
   is_finetune <- !is.null(checkpoint)
 

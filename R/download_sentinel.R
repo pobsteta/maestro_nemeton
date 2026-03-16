@@ -262,14 +262,89 @@ build_date_ranges <- function(annees_sentinel, saison = "ete") {
          "ou un vecteur de 2 mois c(debut, fin)")
   }
 
+  # Calculer le dernier jour du mois de fin (gere fevrier et annees bissextiles)
+  end_dates <- vapply(annees_sentinel, function(yr) {
+    # Le dernier jour du mois M = veille du 1er du mois M+1
+    if (mois[2] == 12) {
+      next_month_1st <- as.Date(sprintf("%d-01-01", yr + 1L))
+    } else {
+      next_month_1st <- as.Date(sprintf("%d-%02d-01", yr, mois[2] + 1L))
+    }
+    as.character(next_month_1st - 1L)
+  }, character(1))
+
   data.frame(
     start_date = sprintf("%d-%02d-01", annees_sentinel, mois[1]),
-    end_date   = sprintf("%d-%02d-%02d", annees_sentinel, mois[2],
-                          ifelse(mois[2] %in% c(4, 6, 9, 11), 30, 31)),
+    end_date   = end_dates,
     annee      = annees_sentinel,
     stringsAsFactors = FALSE
   )
 }
+
+# --- Boucle multi-annuelle generique ---
+
+#' Telecharger des scenes Sentinel sur plusieurs annees avec fallback
+#'
+#' Factorise la logique commune aux telechargements S1 et S2 multi-temporels :
+#' pour chaque annee, rechercher via STAC, fallback sur l'annee entiere si
+#' la saison ne donne rien, puis telecharger les N meilleures scenes.
+#'
+#' @param bbox_wgs84 Bbox WGS84 (vecteur numerique)
+#' @param date_ranges data.frame de [build_date_ranges()]
+#' @param search_fn Fonction de recherche STAC (ex: search_s2_stac ou search_s1_stac)
+#' @param download_fn Fonction de telechargement d'une scene.
+#'   Recoit `(search_result, scene_row, ...)` et retourne un SpatRaster ou NULL.
+#' @param max_scenes_par_annee Nombre max de scenes par annee
+#' @param label Label pour les messages (ex: "S2", "S1 ascending")
+#' @param ... Arguments supplementaires passes a search_fn et download_fn
+#' @return Liste de SpatRaster (peut etre vide)
+#' @noRd
+.download_multitemporal <- function(bbox_wgs84, date_ranges, search_fn,
+                                     download_fn, max_scenes_par_annee = 3L,
+                                     label = "Sentinel", ...) {
+  all_scenes <- list()
+
+  for (i in seq_len(nrow(date_ranges))) {
+    yr <- date_ranges$annee[i]
+    message(sprintf("  --- %s, annee %d ---", label, yr))
+
+    search_result <- search_fn(bbox_wgs84,
+                                date_ranges$start_date[i],
+                                date_ranges$end_date[i], ...)
+
+    if (is.null(search_result)) {
+      message(sprintf("    Aucune scene %s pour %d, essai annee entiere...",
+                       label, yr))
+      search_result <- search_fn(bbox_wgs84,
+                                  paste0(yr, "-01-01"),
+                                  paste0(yr, "-12-31"), ...)
+    }
+
+    if (is.null(search_result)) {
+      message(sprintf("    Aucune scene %s trouvee pour %d", label, yr))
+      next
+    }
+
+    scenes <- search_result$scenes
+    n_sel <- min(nrow(scenes), max_scenes_par_annee)
+
+    for (j in seq_len(n_sel)) {
+      sc <- scenes[j, ]
+      cloud_info <- if ("cloud_cover" %in% names(sc))
+        sprintf(" (nuages: %.0f%%)", sc$cloud_cover) else ""
+      message(sprintf("    Scene %d/%d: %s%s", j, n_sel, sc$id, cloud_info))
+
+      r <- download_fn(search_result, sc)
+      if (!is.null(r)) {
+        all_scenes[[length(all_scenes) + 1]] <- r
+        message(sprintf("    -> OK (%d bandes)", terra::nlyr(r)))
+      }
+    }
+  }
+
+  all_scenes
+}
+
 
 # --- Telechargement S2 mono-scene (interne) ---
 
@@ -441,53 +516,25 @@ download_s2_for_aoi <- function(aoi, output_dir, date_cible = NULL,
                        paste(saison, collapse = "-")))
 
     date_ranges <- build_date_ranges(annees_sentinel, saison)
-    all_scenes <- list()
 
-    for (i in seq_len(nrow(date_ranges))) {
-      yr <- date_ranges$annee[i]
-      message(sprintf("  --- Annee %d ---", yr))
-
-      search_result <- search_s2_stac(bbox_wgs84,
-                                        date_ranges$start_date[i],
-                                        date_ranges$end_date[i],
-                                        max_cloud = 30)
-
-      if (is.null(search_result)) {
-        message(sprintf("    Aucune scene S2 pour %d, essai annee entiere...",
-                         yr))
-        search_result <- search_s2_stac(bbox_wgs84,
-                                          paste0(yr, "-01-01"),
-                                          paste0(yr, "-12-31"),
-                                          max_cloud = 30)
+    # Fonction de telechargement d'une scene S2
+    dl_s2 <- function(search_result, sc) {
+      sel_feature <- NULL
+      for (feat in search_result$items$features) {
+        if (feat$id == sc$id) { sel_feature <- feat; break }
       }
-
-      if (is.null(search_result)) {
-        message(sprintf("    Aucune scene S2 trouvee pour %d", yr))
-        next
-      }
-
-      scenes <- search_result$scenes
-      items_signed <- search_result$items
-      n_sel <- min(nrow(scenes), max_scenes_par_annee)
-
-      for (j in seq_len(n_sel)) {
-        sc <- scenes[j, ]
-        message(sprintf("    Scene %d/%d: %s (nuages: %.0f%%)",
-                         j, n_sel, sc$id, sc$cloud_cover))
-
-        sel_feature <- NULL
-        for (feat in items_signed$features) {
-          if (feat$id == sc$id) { sel_feature <- feat; break }
-        }
-        if (is.null(sel_feature)) next
-
-        r <- .download_s2_scene(sel_feature, aoi_vect, template)
-        if (!is.null(r)) {
-          all_scenes[[length(all_scenes) + 1]] <- r
-          message(sprintf("    -> OK (%d bandes)", terra::nlyr(r)))
-        }
-      }
+      if (is.null(sel_feature)) return(NULL)
+      .download_s2_scene(sel_feature, aoi_vect, template)
     }
+
+    all_scenes <- .download_multitemporal(
+      bbox_wgs84, date_ranges,
+      search_fn = search_s2_stac,
+      download_fn = dl_s2,
+      max_scenes_par_annee = max_scenes_par_annee,
+      label = "S2",
+      max_cloud = 30
+    )
 
     if (length(all_scenes) == 0) {
       warning("Aucune scene Sentinel-2 telechargee sur la periode multi-annuelle")
@@ -640,49 +687,21 @@ download_s1_for_aoi <- function(aoi, output_dir, date_cible = NULL,
         next
       }
 
-      all_orbit_scenes <- list()
-
-      for (i in seq_len(nrow(date_ranges))) {
-        yr <- date_ranges$annee[i]
-        message(sprintf("  --- S1 %s, annee %d ---", orbit, yr))
-
-        search_result <- search_s1_stac(bbox_wgs84,
-                                          date_ranges$start_date[i],
-                                          date_ranges$end_date[i],
-                                          orbit_direction = orbit)
-
-        if (is.null(search_result)) {
-          message(sprintf("    Aucun produit S1 %s pour %d, essai annee...",
-                           orbit, yr))
-          search_result <- search_s1_stac(bbox_wgs84,
-                                            paste0(yr, "-01-01"),
-                                            paste0(yr, "-12-31"),
-                                            orbit_direction = orbit)
-        }
-
-        if (is.null(search_result)) {
-          message(sprintf("    Aucun produit S1 %s pour %d", orbit, yr))
-          next
-        }
-
-        scenes <- search_result$scenes
-        n_sel <- min(nrow(scenes), max_scenes_par_annee)
-
-        for (j in seq_len(n_sel)) {
-          sc <- scenes[j, ]
-          message(sprintf("    Scene %d/%d: %s", j, n_sel, sc$id))
-
-          s1_orbit <- .download_s1_orbit(
-            list(scenes = scenes[j, , drop = FALSE],
-                 items = search_result$items),
-            aoi, orbit)
-
-          if (!is.null(s1_orbit)) {
-            all_orbit_scenes[[length(all_orbit_scenes) + 1]] <- s1_orbit
-            message(sprintf("    -> OK (%d bandes)", terra::nlyr(s1_orbit)))
-          }
-        }
+      # Fonction de telechargement d'une scene S1
+      dl_s1 <- function(search_result, sc) {
+        .download_s1_orbit(
+          list(scenes = sc, items = search_result$items),
+          aoi, orbit)
       }
+
+      all_orbit_scenes <- .download_multitemporal(
+        bbox_wgs84, date_ranges,
+        search_fn = search_s1_stac,
+        download_fn = dl_s1,
+        max_scenes_par_annee = max_scenes_par_annee,
+        label = sprintf("S1 %s", orbit),
+        orbit_direction = orbit
+      )
 
       if (length(all_orbit_scenes) > 0) {
         message(sprintf("  Total S1 %s: %d scenes", orbit,

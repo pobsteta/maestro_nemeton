@@ -223,6 +223,26 @@ executer_inference_multimodal <- function(patches_multimodal, fichiers_modele,
   message("=== Inference MAESTRO multi-modale ===")
   message(sprintf("  Modalites: %s", paste(modalites, collapse = " + ")))
 
+  # Validation des modalites
+  valid_modalities <- c("aerial", "dem", "s2", "s1_asc", "s1_des", "spot")
+  unknown <- setdiff(modalites, valid_modalities)
+  if (length(unknown) > 0) {
+    stop(sprintf("Modalite(s) inconnue(s): %s. Valides: %s",
+                 paste(unknown, collapse = ", "),
+                 paste(valid_modalities, collapse = ", ")))
+  }
+
+  # Validation des patches
+  if (length(patches_multimodal) == 0) {
+    stop("Aucun patch a traiter (patches_multimodal est vide)")
+  }
+  first_mods <- names(patches_multimodal[[1]])
+  missing_mods <- setdiff(modalites, first_mods)
+  if (length(missing_mods) > 0) {
+    stop(sprintf("Modalite(s) manquante(s) dans les patches: %s",
+                 paste(missing_mods, collapse = ", ")))
+  }
+
   py_path <- python_module_path()
   maestro <- reticulate::import_from_path("maestro_inference", path = py_path)
 

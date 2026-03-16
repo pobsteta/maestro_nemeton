@@ -392,10 +392,7 @@ download_treesatai <- function(output_dir = "data/TreeSatAI",
 #' sur 50k fichiers car c'est une simple operation d'inode.
 #' @keywords internal
 .treesatai_organize_extracted <- function(src_dir, output_dir, mod, split_info) {
-  species <- c("Abies", "Acer", "Alnus", "Betula", "Carpinus",
-               "Castanea", "Fagus", "Fraxinus", "Larix", "Picea",
-               "Pinus", "Populus", "Prunus", "Pseudotsuga", "Quercus",
-               "Robinia", "Salix", "Sorbus", "Taxus", "Tilia")
+  species <- treesatai_species()
 
   # Verifier si la structure contient deja train/test
   has_train <- dir.exists(file.path(src_dir, "train"))
@@ -518,11 +515,7 @@ download_treesatai <- function(output_dir = "data/TreeSatAI",
 .treesatai_download_zenodo <- function(output_dir, modalities) {
   message("  Source: Zenodo (per-espece)")
 
-  # Les 20 genres TreeSatAI
-  species <- c("Abies", "Acer", "Alnus", "Betula", "Carpinus",
-               "Castanea", "Fagus", "Fraxinus", "Larix", "Picea",
-               "Pinus", "Populus", "Prunus", "Pseudotsuga", "Quercus",
-               "Robinia", "Salix", "Sorbus", "Taxus", "Tilia")
+  species <- treesatai_species()
 
   # DOI: 10.5281/zenodo.6598391
   # Les fichiers aerial sont par espece, pas par split train/test
