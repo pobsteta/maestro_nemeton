@@ -166,45 +166,79 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
                    bbox_wgs84["xmin"], bbox_wgs84["ymin"],
                    bbox_wgs84["xmax"], bbox_wgs84["ymax"]))
 
-  # Telecharger le GeoJSON
+  # Telecharger via curl WFS direct
+  bdforet <- NULL
   tmp_geojson <- tempfile(fileext = ".geojson")
-  tryCatch({
+  wfs_ok <- tryCatch({
     h <- curl::new_handle()
     curl::handle_setopt(h, followlocation = TRUE, timeout = 120L)
     curl::curl_download(url, tmp_geojson, handle = h)
+    TRUE
   }, error = function(e) {
-    # Fallback : essayer d'autres noms de couche
+    # Essayer d'autres noms de couche
     alt_layers <- c(
       "LANDUSE.FORESTINVENTORY.V2:formation_vegetale",
       "bdforet_v2:formation_vegetale",
       "IGNF_BDFORET_V2:formation_vegetale"
     )
-    success <- FALSE
     for (alt in alt_layers) {
       message(sprintf("  Essai couche alternative: %s", alt))
       alt_params <- wfs_params
       alt_params$TYPENAMES <- alt
       alt_query <- paste(names(alt_params), alt_params, sep = "=", collapse = "&")
       alt_url <- paste0(wfs_url, "?", alt_query)
-      tryCatch({
+      ok <- tryCatch({
         curl::curl_download(alt_url, tmp_geojson, handle = h)
-        success <- TRUE
-        break
-      }, error = function(e2) NULL)
+        TRUE
+      }, error = function(e2) FALSE)
+      if (ok) return(TRUE)
     }
-    if (!success) {
-      stop(sprintf("Echec WFS BD Foret: %s\nEssayez de telecharger manuellement depuis https://geoservices.ign.fr/bdforet",
-                    e$message))
-    }
+    message(sprintf("  WFS direct echoue: %s", e$message))
+    FALSE
   })
 
-  # Lire le GeoJSON
-  bdforet <- tryCatch({
-    sf::st_read(tmp_geojson, quiet = TRUE)
-  }, error = function(e) {
-    stop(sprintf("Erreur lecture GeoJSON BD Foret: %s", e$message))
-  })
-  unlink(tmp_geojson)
+  if (wfs_ok) {
+    bdforet <- tryCatch({
+      sf::st_read(tmp_geojson, quiet = TRUE)
+    }, error = function(e) {
+      message(sprintf("  Erreur lecture GeoJSON: %s", e$message))
+      NULL
+    })
+    unlink(tmp_geojson)
+  }
+
+  # Fallback: utiliser happign::get_wfs() si disponible
+  if (is.null(bdforet) || (inherits(bdforet, "sf") && nrow(bdforet) == 0)) {
+    if (!requireNamespace("happign", quietly = TRUE)) {
+      stop("Echec WFS BD Foret et package 'happign' non installe.\n",
+           "Installez-le avec: install.packages('happign')\n",
+           "Ou telechargez manuellement depuis https://geoservices.ign.fr/bdforet")
+    }
+    message("  Fallback: telechargement via happign::get_wfs()")
+    happign_layers <- c(
+      "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale",
+      "LANDUSE.FORESTINVENTORY.V2:formation_vegetale",
+      "BDFORET_V2:formation_vegetale"
+    )
+    for (lyr in happign_layers) {
+      message(sprintf("  Essai happign couche: %s", lyr))
+      bdforet <- tryCatch({
+        happign::get_wfs(x = aoi_wgs84, layer = lyr)
+      }, error = function(e) {
+        message(sprintf("    Echec: %s", e$message))
+        NULL
+      })
+      if (!is.null(bdforet) && inherits(bdforet, "sf") && nrow(bdforet) > 0) {
+        message(sprintf("  happign: %d polygones telecharges via %s", nrow(bdforet), lyr))
+        break
+      }
+      bdforet <- NULL
+    }
+    if (is.null(bdforet) || nrow(bdforet) == 0) {
+      stop("Echec telechargement BD Foret via WFS et happign.\n",
+           "Telechargez manuellement depuis https://geoservices.ign.fr/bdforet")
+    }
+  }
 
   if (nrow(bdforet) == 0) {
     warning("Aucun polygone BD Foret V2 trouve pour cette AOI")
