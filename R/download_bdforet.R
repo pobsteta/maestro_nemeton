@@ -480,10 +480,13 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
 
     # Creer un sf pour la bbox englobante du domaine
     crs_str <- terra::crs(terra::rast(tif_files[1]))
-    bbox_poly <- sf::st_as_sfc(sf::st_bbox(c(
-      xmin = bbox_all[1], xmax = bbox_all[2],
-      ymin = bbox_all[3], ymax = bbox_all[4]
-    ), crs = sf::st_crs(crs_str)))
+    bbox_vals <- as.numeric(as.vector(bbox_all))
+    names(bbox_vals) <- c("xmin", "xmax", "ymin", "ymax")
+    if (anyNA(bbox_vals) || any(!is.finite(bbox_vals))) {
+      warning(sprintf("  Domaine %s: bbox invalide apres union, ignore", dom_label))
+      next
+    }
+    bbox_poly <- sf::st_as_sfc(sf::st_bbox(bbox_vals, crs = sf::st_crs(crs_str)))
     aoi_domaine <- sf::st_sf(geometry = bbox_poly)
 
     # Telecharger la BD Foret V2 pour tout le domaine
