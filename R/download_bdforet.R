@@ -214,6 +214,18 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
   # Reprojeter en Lambert-93
   bdforet <- sf::st_transform(bdforet, 2154)
 
+  # Reparer les geometries invalides (coordonnees NA, anneaux non fermes, etc.)
+  bdforet <- sf::st_make_valid(bdforet)
+  valid_mask <- !sf::st_is_empty(bdforet)
+  if (any(!valid_mask)) {
+    message(sprintf("  %d geometries invalides supprimees", sum(!valid_mask)))
+    bdforet <- bdforet[valid_mask, ]
+  }
+  if (nrow(bdforet) == 0) {
+    warning("Aucun polygone BD Foret valide apres nettoyage")
+    return(NULL)
+  }
+
   # Clipper sur l'AOI
   bdforet <- sf::st_intersection(bdforet, sf::st_union(aoi))
 
