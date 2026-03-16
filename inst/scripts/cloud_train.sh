@@ -44,22 +44,26 @@ send_notification() {
     # --- Email ---
     if [ -n "$NOTIFY_EMAIL" ]; then
         echo "  -> Envoi email a $NOTIFY_EMAIL"
+        # Utilise des variables d'environnement au lieu de l'interpolation bash
+        # dans le code Python pour eviter les injections de code
+        MAIL_SUBJECT="$SUBJECT" MAIL_BODY="$BODY" MAIL_TO="$NOTIFY_EMAIL" \
         python3 -c "
-import smtplib
+import os, smtplib, socket
 from email.mime.text import MIMEText
-import socket
 
 hostname = socket.gethostname()
-body = '''$BODY'''
+body = os.environ['MAIL_BODY']
+subject = os.environ['MAIL_SUBJECT']
+recipient = os.environ['MAIL_TO']
 
 msg = MIMEText(body)
-msg['Subject'] = '$SUBJECT'
+msg['Subject'] = subject
 msg['From'] = 'maestro@' + hostname
-msg['To'] = '$NOTIFY_EMAIL'
+msg['To'] = recipient
 
 try:
     with smtplib.SMTP('localhost', 25, timeout=10) as s:
-        s.sendmail(msg['From'], ['$NOTIFY_EMAIL'], msg.as_string())
+        s.sendmail(msg['From'], [recipient], msg.as_string())
     print('    Email envoye')
 except Exception as e:
     print(f'    SMTP local echoue: {e}')

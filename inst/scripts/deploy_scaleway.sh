@@ -26,6 +26,8 @@
 #   --lr FLOAT             Learning rate (defaut: 1e-3)
 #   --modalites MODS       Modalites (defaut: aerial)
 #   --unfreeze             Degeler le backbone (fine-tuning complet)
+#   --segmentation         Mode segmentation (decodeur NDP0 au lieu de TreeSatAI)
+#   --aoi AOI_PATH         Chemin local vers l'AOI (mode segmentation)
 #   --name NAME            Nom de l'instance (defaut: maestro-train)
 #   --dry-run              Afficher les commandes sans executer
 #
@@ -63,6 +65,9 @@ BATCH_SIZE=64
 LR="1e-3"
 MODALITES="aerial"
 UNFREEZE=""
+SEGMENTATION=false
+FLAIR_NIVEAU=""
+AOI_LOCAL=""
 DRY_RUN=false
 
 # --- Parse arguments ---
@@ -76,6 +81,9 @@ while [[ $# -gt 0 ]]; do
         --lr)            LR="$2"; shift 2 ;;
         --modalites)     MODALITES="$2"; shift 2 ;;
         --unfreeze)      UNFREEZE="--unfreeze"; shift ;;
+        --segmentation)  SEGMENTATION=true; shift ;;
+        --flair)         FLAIR_NIVEAU="$2"; SEGMENTATION=true; shift 2 ;;
+        --aoi)           AOI_LOCAL="$2"; shift 2 ;;
         --name)          INSTANCE_NAME="$2"; shift 2 ;;
         --dry-run)       DRY_RUN=true; shift ;;
         -h|--help)
@@ -101,6 +109,13 @@ echo "  Batch size    : $BATCH_SIZE"
 echo "  Learning rate : $LR"
 echo "  Modalites     : $MODALITES"
 echo "  Unfreeze      : ${UNFREEZE:-non}"
+echo "  Mode          : $(if $SEGMENTATION; then echo 'segmentation NDP0'; else echo 'classification TreeSatAI'; fi)"
+if [ -n "$FLAIR_NIVEAU" ]; then
+echo "  FLAIR niveau  : $FLAIR_NIVEAU"
+fi
+if [ -n "$AOI_LOCAL" ]; then
+echo "  AOI locale    : $AOI_LOCAL"
+fi
 echo ""
 
 # --- Verifier les pre-requis ---
@@ -159,11 +174,28 @@ if $DRY_RUN; then
     echo "IP=\$(scw instance server get <SERVER_ID> zone=$ZONE -o json | jq -r '.public_ip.address')"
     echo ""
     echo "# 4. Copier et lancer le script d'entrainement"
+    if $SEGMENTATION; then
+    echo "scp inst/scripts/cloud_train_segmentation.sh root@\$IP:~/"
+    if [ -n "$FLAIR_NIVEAU" ]; then
+    echo "ssh root@\$IP 'FLAIR_NIVEAU=$FLAIR_NIVEAU EPOCHS=$EPOCHS BATCH_SIZE=$BATCH_SIZE LR=$LR MODALITES=$MODALITES bash ~/cloud_train_segmentation.sh'"
+    elif [ -n "$AOI_LOCAL" ]; then
+    echo "scp $AOI_LOCAL root@\$IP:/data/aoi.gpkg"
+    echo "ssh root@\$IP 'AOI_PATH=/data/aoi.gpkg EPOCHS=$EPOCHS BATCH_SIZE=$BATCH_SIZE LR=$LR MODALITES=$MODALITES bash ~/cloud_train_segmentation.sh'"
+    else
+    echo "# Upload des patches prepares :"
+    echo "scp -r data/segmentation/ root@\$IP:/data/segmentation/"
+    echo "ssh root@\$IP 'EPOCHS=$EPOCHS BATCH_SIZE=$BATCH_SIZE LR=$LR MODALITES=$MODALITES bash ~/cloud_train_segmentation.sh'"
+    fi
+    echo ""
+    echo "# 5. Recuperer le decodeur"
+    echo "scp root@\$IP:~/maestro_nemeton/outputs/segmentation/segmenter_ndp0_best.pt ."
+    else
     echo "scp inst/scripts/cloud_train.sh root@\$IP:~/"
     echo "ssh root@\$IP 'EPOCHS=$EPOCHS BATCH_SIZE=$BATCH_SIZE bash ~/cloud_train.sh'"
     echo ""
     echo "# 5. Recuperer le modele"
     echo "scp root@\$IP:~/maestro_nemeton/outputs/training/maestro_treesatai_best.pt ."
+    fi
     echo ""
     echo "# 6. Supprimer l'instance"
     echo "scw instance server terminate <SERVER_ID> zone=$ZONE with-ip=true"
@@ -228,27 +260,67 @@ log_info "=== Etape 4 : Deploiement de l'entrainement ==="
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-log_info "Envoi du script d'entrainement..."
-scp -o StrictHostKeyChecking=no "$REPO_ROOT/inst/scripts/cloud_train.sh" "root@$PUBLIC_IP:~/"
+if $SEGMENTATION; then
+    TRAIN_SCRIPT="cloud_train_segmentation.sh"
+    RESULT_FILE="segmenter_ndp0_best.pt"
+    RESULT_DIR="outputs/segmentation"
+else
+    TRAIN_SCRIPT="cloud_train.sh"
+    RESULT_FILE="maestro_treesatai_best.pt"
+    RESULT_DIR="outputs/training"
+fi
+
+log_info "Envoi du script d'entrainement ($TRAIN_SCRIPT)..."
+scp -o StrictHostKeyChecking=no "$REPO_ROOT/inst/scripts/$TRAIN_SCRIPT" "root@$PUBLIC_IP:~/"
+
+# Envoyer l'AOI si fourni (mode segmentation)
+if $SEGMENTATION && [ -n "$AOI_LOCAL" ]; then
+    log_info "Envoi de l'AOI: $AOI_LOCAL"
+    ssh -o StrictHostKeyChecking=no "root@$PUBLIC_IP" "mkdir -p /data"
+    scp -o StrictHostKeyChecking=no "$AOI_LOCAL" "root@$PUBLIC_IP:/data/aoi.gpkg"
+fi
 
 # Lancer l'entrainement dans tmux (persistent meme si SSH deconnecte)
 log_info "Lancement de l'entrainement dans tmux..."
-ssh -o StrictHostKeyChecking=no "root@$PUBLIC_IP" bash -c "'
-    # Installer tmux si absent
-    apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
 
-    # Lancer dans tmux
-    tmux new-session -d -s maestro \"
-        export EPOCHS=$EPOCHS
-        export BATCH_SIZE=$BATCH_SIZE
-        bash ~/cloud_train.sh 2>&1 | tee ~/train.log
-        echo ''
-        echo '========================================='
-        echo ' ENTRAINEMENT TERMINE'
-        echo ' Modele: ~/maestro_nemeton/outputs/training/maestro_treesatai_best.pt'
-        echo '========================================='
-    \"
-'"
+if $SEGMENTATION; then
+    EXTRA_ENV=""
+    if [ -n "$FLAIR_NIVEAU" ]; then
+        EXTRA_ENV="export FLAIR_NIVEAU=$FLAIR_NIVEAU"
+    elif [ -n "$AOI_LOCAL" ]; then
+        EXTRA_ENV="export AOI_PATH=/data/aoi.gpkg"
+    fi
+    ssh -o StrictHostKeyChecking=no "root@$PUBLIC_IP" bash -c "'
+        apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
+        tmux new-session -d -s maestro \"
+            $EXTRA_ENV
+            export EPOCHS=$EPOCHS
+            export BATCH_SIZE=$BATCH_SIZE
+            export LR=$LR
+            export MODALITES=$MODALITES
+            bash ~/$TRAIN_SCRIPT 2>&1 | tee ~/train.log
+            echo \\\"\\\"
+            echo \\\"=========================================\\\"
+            echo \\\" ENTRAINEMENT TERMINE\\\"
+            echo \\\" Decodeur: ~/maestro_nemeton/$RESULT_DIR/$RESULT_FILE\\\"
+            echo \\\"=========================================\\\"
+        \"
+    '"
+else
+    ssh -o StrictHostKeyChecking=no "root@$PUBLIC_IP" bash -c "'
+        apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
+        tmux new-session -d -s maestro \"
+            export EPOCHS=$EPOCHS
+            export BATCH_SIZE=$BATCH_SIZE
+            bash ~/$TRAIN_SCRIPT 2>&1 | tee ~/train.log
+            echo \\\"\\\"
+            echo \\\"=========================================\\\"
+            echo \\\" ENTRAINEMENT TERMINE\\\"
+            echo \\\" Modele: ~/maestro_nemeton/$RESULT_DIR/$RESULT_FILE\\\"
+            echo \\\"=========================================\\\"
+        \"
+    '"
+fi
 
 log_ok "Entrainement lance en arriere-plan (tmux session: maestro)"
 
@@ -275,13 +347,23 @@ echo "  # Verifier la GPU :"
 echo "  ssh root@$PUBLIC_IP 'nvidia-smi'"
 echo ""
 echo "  # Recuperer le modele entraine :"
-echo "  scp root@$PUBLIC_IP:~/maestro_nemeton/outputs/training/maestro_treesatai_best.pt ."
+echo "  scp root@$PUBLIC_IP:~/maestro_nemeton/$RESULT_DIR/$RESULT_FILE ."
 echo ""
+if $SEGMENTATION; then
+echo "  # Predire sur votre AOI (segmentation 0.2m) :"
+echo "  library(maestro)"
+echo "  maestro_segmentation_pipeline("
+echo "    aoi_path = 'data/aoi.gpkg',"
+echo "    backbone_path = 'MAESTRO_pretrain.ckpt',"
+echo "    decoder_path = '$RESULT_FILE'"
+echo "  )"
+else
 echo "  # Predire sur votre AOI (apres recuperation du modele) :"
 echo "  Rscript inst/scripts/predict_from_checkpoint.R \\"
 echo "      --aoi data/aoi.gpkg \\"
-echo "      --checkpoint maestro_treesatai_best.pt \\"
+echo "      --checkpoint $RESULT_FILE \\"
 echo "      --output outputs/"
+fi
 echo ""
 echo "  # IMPORTANT : Supprimer l'instance apres recuperation du modele !"
 echo "  scw instance server terminate $SERVER_ID zone=$ZONE with-ip=true"
