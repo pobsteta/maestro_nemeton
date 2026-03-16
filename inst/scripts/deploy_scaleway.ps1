@@ -505,7 +505,7 @@ if ($NotifyEmail) {
     $PkgList = "tmux msmtp msmtp-mta"
     Log-Info "Installation de msmtp pour notification email vers $NotifyEmail"
 }
-ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "apt-get update -qq && apt-get install -y -qq $PkgList > /dev/`$null 2>&1"
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "apt-get update -qq && apt-get install -y -qq $PkgList > /dev/null 2>&1"
 
 # Lancer l'entrainement dans tmux
 Log-Info "Lancement de l'entrainement dans tmux..."
