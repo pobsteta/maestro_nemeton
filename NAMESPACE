@@ -57,6 +57,19 @@ export(creer_patches_inference)
 export(assembler_resultats_flair)
 export(flair_python_module_path)
 
+# --- Segmentation dense (NDP0) ---
+export(classes_ndp0)
+export(mapping_tfv_ndp0)
+export(tfv_to_ndp0)
+export(download_bdforet_for_aoi)
+export(rasteriser_bdforet)
+export(preparer_labels_ndp0)
+export(charger_segmenter)
+export(executer_segmentation)
+export(preparer_patches_entrainement)
+export(maestro_segmentation_pipeline)
+export(preparer_donnees_segmentation)
+
 # --- Telechargement FLAIR-HUB dataset ---
 export(hf_list_files)
 export(hf_download_file)
