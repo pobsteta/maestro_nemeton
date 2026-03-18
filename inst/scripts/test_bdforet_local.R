@@ -222,44 +222,62 @@ if ("code_ndp0" %in% names(bdforet)) {
 message("")
 message("=== ETAPE 4/4 : Labellisation de 10 patches (test) ===")
 
-# Prendre un echantillon de 10 patches
-n_test <- min(10, length(tif_files))
-test_tifs <- tif_files[1:n_test]
-
 label_dir <- file.path(flair_dir, "labels_ndp0", DOMAINE)
 dir.create(label_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Reparer les geometries invalides
+# 1) Reparer les geometries invalides
 bdforet <- sf::st_make_valid(bdforet)
 bdforet <- bdforet[!sf::st_is_empty(bdforet), ]
 message(sprintf("  %d geometries valides", nrow(bdforet)))
 
-# Debug : bbox BD Foret vs patches
-bb_bdforet <- sf::st_bbox(bdforet)
-message(sprintf("  Bbox BD Foret : xmin=%.0f ymin=%.0f xmax=%.0f ymax=%.0f (CRS: %s)",
-                bb_bdforet["xmin"], bb_bdforet["ymin"],
-                bb_bdforet["xmax"], bb_bdforet["ymax"],
-                sf::st_crs(bdforet)$input))
-
-ref_first <- terra::rast(test_tifs[1])
-ext_first <- terra::ext(ref_first)
-message(sprintf("  Bbox patch 1  : xmin=%.0f ymin=%.0f xmax=%.0f ymax=%.0f (CRS: %s)",
-                terra::xmin(ext_first), terra::ymin(ext_first),
-                terra::xmax(ext_first), terra::ymax(ext_first),
-                terra::crs(ref_first, describe = TRUE)$name))
-
-# Transformer bdforet dans le CRS des patches
+# 2) Transformer bdforet dans le CRS des patches
 patch_crs <- sf::st_crs(crs_str)
 bdforet <- sf::st_transform(bdforet, patch_crs)
-bb_bdforet2 <- sf::st_bbox(bdforet)
-message(sprintf("  Bbox BD Foret (apres transform) : xmin=%.0f ymin=%.0f xmax=%.0f ymax=%.0f",
-                bb_bdforet2["xmin"], bb_bdforet2["ymin"],
-                bb_bdforet2["xmax"], bb_bdforet2["ymax"]))
 
-# Convertir BD Foret en SpatVector une seule fois (terra gere le clipping automatiquement)
+# 3) Convertir en SpatVector une seule fois
 bdforet_vect <- terra::vect(bdforet)
-message(sprintf("  SpatVector BD Foret : %d features, CRS: %s",
-                nrow(bdforet_vect), terra::crs(bdforet_vect, describe = TRUE)$name))
+bb_vect <- as.vector(terra::ext(bdforet_vect))
+message(sprintf("  SpatVector BD Foret : %d features, ext=[%.0f, %.0f, %.0f, %.0f]",
+                nrow(bdforet_vect), bb_vect[1], bb_vect[2], bb_vect[3], bb_vect[4]))
+
+# 4) Chercher des patches qui intersectent reellement la BD Foret
+# (les premiers par ordre alphabetique peuvent tomber hors foret)
+message("  Recherche de patches intersectant la BD Foret...")
+n_test <- min(10, length(tif_files))
+candidate_tifs <- character(0)
+for (tif in tif_files) {
+  r <- terra::rast(tif)
+  cr <- tryCatch(terra::crop(bdforet_vect, terra::ext(r)), error = function(e) NULL)
+  if (!is.null(cr) && nrow(cr) > 0) {
+    candidate_tifs <- c(candidate_tifs, tif)
+    if (length(candidate_tifs) >= n_test) break
+  }
+}
+
+if (length(candidate_tifs) == 0) {
+  message("  AUCUN patch n'intersecte la BD Foret !")
+  # Diagnostiquer : afficher le range spatial des patches vs BD Foret
+  n_diag <- min(50, length(tif_files))
+  all_ext <- lapply(tif_files[1:n_diag], function(f) as.vector(terra::ext(terra::rast(f))))
+  all_ext <- do.call(rbind, all_ext)
+  message(sprintf("  Patches (%d premiers): x=[%.0f, %.0f] y=[%.0f, %.0f]",
+                  n_diag, min(all_ext[,1]), max(all_ext[,2]),
+                  min(all_ext[,3]), max(all_ext[,4])))
+  message(sprintf("  BD Foret             : x=[%.0f, %.0f] y=[%.0f, %.0f]",
+                  bb_vect[1], bb_vect[2], bb_vect[3], bb_vect[4]))
+  test_tifs <- tif_files[1:n_test]
+} else {
+  message(sprintf("  %d patches trouvés intersectant la BD Foret", length(candidate_tifs)))
+  test_tifs <- candidate_tifs
+  n_test <- length(test_tifs)
+}
+
+# 5) Debug : afficher les extents
+ref_first <- terra::rast(test_tifs[1])
+ext_first <- as.vector(terra::ext(ref_first))
+message(sprintf("  Patch 1 ext: [%.0f, %.0f, %.0f, %.0f] CRS: %s",
+                ext_first[1], ext_first[2], ext_first[3], ext_first[4],
+                terra::crs(ref_first, describe = TRUE)$name))
 
 results <- data.frame(
   patch = character(0),
@@ -275,31 +293,17 @@ for (i in seq_along(test_tifs)) {
   patch_name <- tools::file_path_sans_ext(basename(tif))
   label_path <- file.path(label_dir, paste0(patch_name, ".tif"))
 
-  # Lire l'emprise du patch
+  # Creer le raster label (meme emprise/resolution que le patch, 1 seule bande)
   ref_patch <- terra::rast(tif)
-
-  # Creer le raster label (meme emprise/resolution que le patch)
-  label_rast <- terra::rast(ref_patch)
+  label_rast <- terra::rast(
+    xmin = terra::xmin(ref_patch), xmax = terra::xmax(ref_patch),
+    ymin = terra::ymin(ref_patch), ymax = terra::ymax(ref_patch),
+    nrows = terra::nrow(ref_patch), ncols = terra::ncol(ref_patch),
+    crs = terra::crs(ref_patch), nlyrs = 1
+  )
   terra::values(label_rast) <- 9L  # Non-foret par defaut
 
-  # Debug pour le premier patch
-  if (i == 1) {
-    message(sprintf("  DEBUG patch ext: %s", paste(as.vector(terra::ext(ref_patch)), collapse=", ")))
-    message(sprintf("  DEBUG patch CRS: %s", terra::crs(ref_patch, describe = TRUE)$name))
-    message(sprintf("  DEBUG bdforet_vect ext: %s", paste(as.vector(terra::ext(bdforet_vect)), collapse=", ")))
-    # Test : combien de polygones intersectent ce patch ?
-    patch_ext_vect <- terra::ext(ref_patch)
-    test_crop <- tryCatch(terra::crop(bdforet_vect, patch_ext_vect), error = function(e) {
-      message(sprintf("  DEBUG crop error: %s", e$message))
-      NULL
-    })
-    if (!is.null(test_crop)) {
-      message(sprintf("  DEBUG terra::crop: %d polygones dans l'emprise du patch", nrow(test_crop)))
-    }
-  }
-
-  # Rasteriser directement - terra::rasterize ne traite que les polygones
-  # qui intersectent l'extent du raster template (pas besoin de st_intersection)
+  # Rasteriser directement - terra gere le clipping via l'extent du template
   layer <- tryCatch({
     terra::rasterize(bdforet_vect, label_rast, field = "code_ndp0")
   }, error = function(e) {
