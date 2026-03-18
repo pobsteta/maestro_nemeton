@@ -16,7 +16,7 @@
 
 args <- commandArgs(trailingOnly = TRUE)
 DOMAINE   <- if (length(args) >= 1) args[1] else "D033-2018"
-DATA_DIR  <- if (length(args) >= 2) args[2] else file.path(tempdir(), "flair_test")
+DATA_DIR  <- if (length(args) >= 2) args[2] else file.path(path.expand("~/dev/maestro_nemeton"), "data")
 
 message("=========================================================")
 message(" MAESTRO - Diagnostic BD Foret / FLAIR-HUB")
