@@ -274,31 +274,7 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
     return(NULL)
   }
 
-  # Nettoyer les geometries AVANT toute operation spatiale
-  # Le WFS GeoJSON peut contenir des geometries avec coordonnees NA
-  # qui font planter st_make_valid/st_transform en bloc.
-  # Tester chaque geometrie individuellement.
-  message("  Nettoyage des geometries...")
-  n_before <- nrow(bdforet)
-  keep <- vapply(seq_len(nrow(bdforet)), function(i) {
-    tryCatch({
-      g <- sf::st_geometry(bdforet[i, ])
-      g_valid <- sf::st_make_valid(g)
-      if (sf::st_is_empty(g_valid)) return(FALSE)
-      TRUE
-    }, error = function(e) FALSE)
-  }, logical(1))
-  if (any(!keep)) {
-    message(sprintf("  %d geometries problematiques supprimees sur %d",
-                     sum(!keep), n_before))
-    bdforet <- bdforet[keep, ]
-  }
-  if (nrow(bdforet) == 0) {
-    warning("Aucun polygone BD Foret valide apres nettoyage")
-    return(NULL)
-  }
-
-  # Maintenant st_make_valid en bloc est sur
+  # Reparer les geometries invalides
   bdforet <- sf::st_make_valid(bdforet)
   bdforet <- bdforet[!sf::st_is_empty(bdforet), ]
 
@@ -657,11 +633,17 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
       # Lire l'emprise du patch aerial
       ref <- terra::rast(tif)
       ext_patch <- terra::ext(ref)
+      # Extraire les coordonnees sans noms (terra ext[i] retourne des valeurs
+      # nommees qui causent xmin.xmin dans sf::st_bbox -> tout NA)
+      px_xmin <- unname(terra::xmin(ext_patch))
+      px_xmax <- unname(terra::xmax(ext_patch))
+      px_ymin <- unname(terra::ymin(ext_patch))
+      px_ymax <- unname(terra::ymax(ext_patch))
 
       # Creer le raster label (250x250 px, 0.2m)
       label_rast <- terra::rast(
-        xmin = ext_patch[1], xmax = ext_patch[2],
-        ymin = ext_patch[3], ymax = ext_patch[4],
+        xmin = px_xmin, xmax = px_xmax,
+        ymin = px_ymin, ymax = px_ymax,
         nrows = terra::nrow(ref), ncols = terra::ncol(ref),
         crs = terra::crs(ref)
       )
@@ -670,8 +652,8 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
       if (!is.null(bdforet) && nrow(bdforet) > 0) {
         # Clipper les polygones BD Foret sur l'emprise du patch
         patch_bbox <- sf::st_as_sfc(sf::st_bbox(c(
-          xmin = ext_patch[1], xmax = ext_patch[2],
-          ymin = ext_patch[3], ymax = ext_patch[4]
+          xmin = px_xmin, xmax = px_xmax,
+          ymin = px_ymin, ymax = px_ymax
         ), crs = sf::st_crs(terra::crs(ref))))
 
         patch_bdforet <- tryCatch({

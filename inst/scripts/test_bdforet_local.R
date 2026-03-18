@@ -229,27 +229,7 @@ test_tifs <- tif_files[1:n_test]
 label_dir <- file.path(flair_dir, "labels_ndp0", DOMAINE)
 dir.create(label_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Nettoyer les geometries problematiques avant toute operation spatiale
-# Tester chaque geometrie individuellement car st_make_valid/st_transform
-# en bloc echoue si UNE SEULE geometrie contient des coordonnees NA
-message("  Nettoyage des geometries...")
-n_before <- nrow(bdforet)
-keep <- vapply(seq_len(nrow(bdforet)), function(i) {
-  tryCatch({
-    g <- sf::st_geometry(bdforet[i, ])
-    # Tester si st_make_valid + st_transform passe sans erreur
-    g_valid <- sf::st_make_valid(g)
-    if (sf::st_is_empty(g_valid)) return(FALSE)
-    TRUE
-  }, error = function(e) FALSE)
-}, logical(1))
-if (any(!keep)) {
-  message(sprintf("  %d geometries problematiques supprimees sur %d",
-                   sum(!keep), n_before))
-  bdforet <- bdforet[keep, ]
-}
-
-# Maintenant st_make_valid et st_transform sont surs
+# Reparer les geometries invalides
 bdforet <- sf::st_make_valid(bdforet)
 bdforet <- bdforet[!sf::st_is_empty(bdforet), ]
 message(sprintf("  %d geometries valides", nrow(bdforet)))
@@ -280,10 +260,17 @@ for (i in seq_along(test_tifs)) {
   ref_patch <- terra::rast(tif)
   ext_patch <- terra::ext(ref_patch)
 
+  # Extraire les coordonnees sans noms (terra::ext()[i] retourne des valeurs nommees
+  # qui causent xmin.xmin au lieu de xmin dans sf::st_bbox -> tout NA)
+  px_xmin <- unname(terra::xmin(ext_patch))
+  px_xmax <- unname(terra::xmax(ext_patch))
+  px_ymin <- unname(terra::ymin(ext_patch))
+  px_ymax <- unname(terra::ymax(ext_patch))
+
   # Creer le raster label
   label_rast <- terra::rast(
-    xmin = ext_patch[1], xmax = ext_patch[2],
-    ymin = ext_patch[3], ymax = ext_patch[4],
+    xmin = px_xmin, xmax = px_xmax,
+    ymin = px_ymin, ymax = px_ymax,
     nrows = terra::nrow(ref_patch), ncols = terra::ncol(ref_patch),
     crs = terra::crs(ref_patch)
   )
@@ -291,8 +278,8 @@ for (i in seq_along(test_tifs)) {
 
   # Intersection avec BD Foret
   patch_bbox <- sf::st_as_sfc(sf::st_bbox(c(
-    xmin = ext_patch[1], xmax = ext_patch[2],
-    ymin = ext_patch[3], ymax = ext_patch[4]
+    xmin = px_xmin, xmax = px_xmax,
+    ymin = px_ymin, ymax = px_ymax
   ), crs = sf::st_crs(terra::crs(ref_patch))))
 
   patch_bdforet <- tryCatch({
