@@ -112,22 +112,68 @@ tfv_to_ndp0 <- function(code_tfv) {
 }
 
 
-# --- Telechargement BD Foret V2 via happign ---
+# --- Telechargement BD Foret V2 via WFS direct ---
 
-#' Telecharger la BD Foret V2 pour une AOI via happign
+#' Telecharger une tuile BD Foret V2 via requete WFS directe
 #'
-#' Utilise le package happign pour telecharger les polygones de la BD Foret V2
-#' depuis le service WFS de la Geoplateforme IGN. Les polygones sont
-#' reprojectes en Lambert-93 et les codes TFV sont convertis en classes NDP0.
+#' Requete WFS GetFeature directe vers la Geoplateforme IGN (sans happign).
+#' Plus fiable que happign pour les grandes bbox.
 #'
-#' @param aoi sf object (AOI en Lambert-93)
+#' @param bbox_vals Vecteur numerique c(xmin, ymin, xmax, ymax) en WGS84
+#' @param typename Nom de la couche WFS
+#' @param max_features Nombre max de features par requete (defaut: 10000)
+#' @return sf data.frame ou NULL
+#' @keywords internal
+.wfs_get_bdforet <- function(bbox_vals, typename, max_features = 10000) {
+  base_url <- "https://data.geopf.fr/wfs/ows"
+  bbox_str <- paste(bbox_vals, collapse = ",")
+
+  wfs_url <- paste0(
+    base_url,
+    "?SERVICE=WFS",
+    "&VERSION=2.0.0",
+    "&REQUEST=GetFeature",
+    "&TYPENAME=", typename,
+    "&BBOX=", bbox_str, ",EPSG:4326",
+    "&SRSNAME=EPSG:4326",
+    "&OUTPUTFORMAT=application/json",
+    "&COUNT=", max_features
+  )
+
+  h <- curl::new_handle()
+  curl::handle_setopt(h, timeout = 120)
+  resp <- curl::curl_fetch_memory(wfs_url, handle = h)
+
+  if (resp$status_code != 200) {
+    warning(sprintf("WFS HTTP %d pour %s", resp$status_code, typename))
+    return(NULL)
+  }
+
+  geojson <- rawToChar(resp$content)
+  if (nchar(geojson) < 50) return(NULL)
+
+  result <- sf::st_read(geojson, quiet = TRUE)
+  if (nrow(result) == 0) return(NULL)
+  result
+}
+
+
+#' Telecharger la BD Foret V2 pour une AOI
+#'
+#' Telecharge les polygones de la BD Foret V2 depuis le service WFS de la
+#' Geoplateforme IGN via requete directe. Les polygones sont reprojectes
+#' en Lambert-93 et les codes TFV sont convertis en classes NDP0.
+#'
+#' Pour les grandes AOI (> 0.5 degre), la bbox est decoupee en tuiles.
+#'
+#' @param aoi sf object (AOI en Lambert-93 ou WGS84)
 #' @param output_dir Repertoire de sortie
 #' @param layer_name Nom de la couche WFS BD Foret
 #' @return sf data.frame avec les polygones BD Foret et la colonne `code_ndp0`
 #' @export
 download_bdforet_for_aoi <- function(aoi, output_dir,
                                       layer_name = "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale") {
-  message("=== Telechargement BD Foret V2 via happign ===")
+  message("=== Telechargement BD Foret V2 via WFS ===")
 
   cache_path <- file.path(output_dir, "bdforet_v2.gpkg")
   if (file.exists(cache_path)) {
@@ -142,24 +188,28 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
   aoi_wgs84 <- sf::st_transform(aoi, 4326)
   bbox_wgs84 <- sf::st_bbox(aoi_wgs84)
 
+  # Extraire les valeurs numeriques sans noms
+  bxmin <- unname(bbox_wgs84["xmin"])
+  bymin <- unname(bbox_wgs84["ymin"])
+  bxmax <- unname(bbox_wgs84["xmax"])
+  bymax <- unname(bbox_wgs84["ymax"])
+
   # Decoupe spatiale : si la bbox depasse ~0.5 degre dans une dimension,
   # on la fractionne en tuiles pour eviter les timeouts du WFS
-  bbox_width <- bbox_wgs84["xmax"] - bbox_wgs84["xmin"]
-  bbox_height <- bbox_wgs84["ymax"] - bbox_wgs84["ymin"]
+  bbox_width <- bxmax - bxmin
+  bbox_height <- bymax - bymin
   tile_size <- 0.5  # degres
 
-  tiles <- list()
-  x_breaks <- seq(unname(bbox_wgs84["xmin"]), unname(bbox_wgs84["xmax"]), by = tile_size)
-  if (tail(x_breaks, 1) < bbox_wgs84["xmax"]) x_breaks <- c(x_breaks, unname(bbox_wgs84["xmax"]))
-  y_breaks <- seq(unname(bbox_wgs84["ymin"]), unname(bbox_wgs84["ymax"]), by = tile_size)
-  if (tail(y_breaks, 1) < bbox_wgs84["ymax"]) y_breaks <- c(y_breaks, unname(bbox_wgs84["ymax"]))
+  x_breaks <- seq(bxmin, bxmax, by = tile_size)
+  if (tail(x_breaks, 1) < bxmax) x_breaks <- c(x_breaks, bxmax)
+  y_breaks <- seq(bymin, bymax, by = tile_size)
+  if (tail(y_breaks, 1) < bymax) y_breaks <- c(y_breaks, bymax)
 
+  tiles <- list()
   for (i in seq_len(length(x_breaks) - 1)) {
     for (j in seq_len(length(y_breaks) - 1)) {
-      tiles <- c(tiles, list(c(
-        xmin = x_breaks[i], xmax = x_breaks[i + 1],
-        ymin = y_breaks[j], ymax = y_breaks[j + 1]
-      )))
+      tiles <- c(tiles, list(c(x_breaks[i], y_breaks[j],
+                                x_breaks[i + 1], y_breaks[j + 1])))
     }
   }
 
@@ -169,6 +219,10 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
                      bbox_width, bbox_height, n_tiles))
   }
 
+  message(sprintf("  Couche WFS: %s", layer_name))
+  message(sprintf("  Bbox: %.4f, %.4f, %.4f, %.4f (WGS84)",
+                   bxmin, bymin, bxmax, bymax))
+
   # Couches a essayer, dans l'ordre
   all_layers <- unique(c(
     layer_name,
@@ -176,51 +230,31 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
     "BDFORET_V2:formation_vegetale"
   ))
 
-  message(sprintf("  Couche WFS: %s", layer_name))
-  message(sprintf("  Bbox: %.4f, %.4f, %.4f, %.4f (WGS84)",
-                   bbox_wgs84["xmin"], bbox_wgs84["ymin"],
-                   bbox_wgs84["xmax"], bbox_wgs84["ymax"]))
-
-  # Telecharger via happign avec gestion des tuiles
+  # Telecharger via requete WFS directe avec gestion des tuiles
   bdforet <- NULL
   for (lyr in all_layers) {
     message(sprintf("  Essai couche: %s", lyr))
-    if (n_tiles > 1) {
-      tile_results <- list()
-      for (k in seq_along(tiles)) {
-        tile <- tiles[[k]]
-        if (n_tiles > 1) {
-          message(sprintf("  Tuile %d/%d [%.4f,%.4f - %.4f,%.4f]",
-                           k, n_tiles, tile["xmin"], tile["ymin"],
-                           tile["xmax"], tile["ymax"]))
-        }
-        tile_sf <- sf::st_as_sfc(sf::st_bbox(
-          c(xmin = tile["xmin"], ymin = tile["ymin"],
-            xmax = tile["xmax"], ymax = tile["ymax"]),
-          crs = sf::st_crs(4326)
-        ))
-        tile_data <- tryCatch({
-          happign::get_wfs(x = tile_sf, layer = lyr)
-        }, error = function(e) {
-          message(sprintf("    Tuile %d echec: %s", k, e$message))
-          NULL
-        })
-        if (!is.null(tile_data) && inherits(tile_data, "sf") && nrow(tile_data) > 0) {
-          tile_results <- c(tile_results, list(tile_data))
-        }
+    tile_results <- list()
+    for (k in seq_along(tiles)) {
+      tile <- tiles[[k]]
+      if (n_tiles > 1) {
+        message(sprintf("  Tuile %d/%d [%.4f,%.4f - %.4f,%.4f]",
+                         k, n_tiles, tile[1], tile[2], tile[3], tile[4]))
       }
-      if (length(tile_results) > 0) {
-        bdforet <- tryCatch(do.call(rbind, tile_results), error = function(e) {
-          message(sprintf("  Erreur combinaison tuiles: %s", e$message))
-          tile_results[[1]]
-        })
-      }
-    } else {
-      bdforet <- tryCatch({
-        happign::get_wfs(x = aoi_wgs84, layer = lyr)
+      tile_data <- tryCatch({
+        .wfs_get_bdforet(tile, lyr)
       }, error = function(e) {
-        message(sprintf("    Echec: %s", e$message))
+        message(sprintf("    Tuile %d echec: %s", k, e$message))
         NULL
+      })
+      if (!is.null(tile_data) && inherits(tile_data, "sf") && nrow(tile_data) > 0) {
+        tile_results <- c(tile_results, list(tile_data))
+      }
+    }
+    if (length(tile_results) > 0) {
+      bdforet <- tryCatch(do.call(rbind, tile_results), error = function(e) {
+        message(sprintf("  Erreur combinaison tuiles: %s", e$message))
+        tile_results[[1]]
       })
     }
     if (!is.null(bdforet) && inherits(bdforet, "sf") && nrow(bdforet) > 0) {
@@ -231,8 +265,8 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
   }
 
   if (is.null(bdforet) || (inherits(bdforet, "sf") && nrow(bdforet) == 0)) {
-    stop("Echec telechargement BD Foret via happign.\n",
-         "Verifiez votre connexion et le service WFS IGN.")
+    stop("Echec telechargement BD Foret via WFS.\n",
+         "Verifiez votre connexion et le service WFS IGN (https://data.geopf.fr/wfs/ows).")
   }
 
   if (nrow(bdforet) == 0) {
