@@ -511,19 +511,35 @@ if ($NotifyEmail) {
 }
 ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "apt-get update -qq && apt-get install -y -qq $PkgList > /dev/null 2>&1"
 
+# Configurer tmux pour garder la fenetre ouverte meme si le process termine
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "echo 'set -g remain-on-exit on' > ~/.tmux.conf"
+
 # Lancer l'entrainement dans tmux
 Log-Info "Lancement de l'entrainement dans tmux..."
-$TmuxCmd = "$EnvString bash ~/$TrainScript 2>&1 | tee ~/train.log; echo ''; echo '=== Entrainement termine (code: '\$'?) ==='; echo 'Appuyez sur Entree pour fermer ou Ctrl+B D pour detacher'; read"
-ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux new-session -d -s maestro \; set-option -t maestro remain-on-exit on \; send-keys '$TmuxCmd' Enter"
+
+# Creer un script wrapper sur le serveur pour eviter les problemes de quotes
+$WrapperContent = @"
+#!/bin/bash
+$EnvString
+bash ~/cloud_train_segmentation.sh 2>&1 | tee ~/train.log
+EXIT_CODE=\$?
+echo ""
+echo "=== Entrainement termine (code: \$EXIT_CODE) ==="
+echo "Appuyez sur Entree pour fermer ou Ctrl+B D pour detacher"
+read
+"@
+$WrapperContent | ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "cat > ~/run_train.sh && chmod +x ~/run_train.sh"
+
+ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux new-session -d -s maestro ~/run_train.sh"
 
 # Verifier que la session tmux existe
 Start-Sleep -Seconds 2
 $tmuxCheck = ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "tmux has-session -t maestro 2>&1 && echo tmux_ok || echo tmux_fail"
 if ($tmuxCheck -notmatch "tmux_ok") {
     Log-Error "La session tmux n'a pas demarre. Diagnostic :"
-    ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "which tmux; tmux list-sessions 2>&1; cat ~/train.log 2>/dev/null | head -20"
+    ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "which tmux; tmux list-sessions 2>&1; cat ~/run_train.sh; cat ~/train.log 2>/dev/null | head -20"
     Log-Warn "Tentative de lancement direct (sans tmux)..."
-    ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "nohup bash -c '$TmuxCmd' > ~/train.log 2>&1 &"
+    ssh -o StrictHostKeyChecking=accept-new "root@$PublicIP" "nohup ~/run_train.sh > ~/train.log 2>&1 &"
 }
 
 Log-Ok "Entrainement lance en arriere-plan (tmux session: maestro)"
