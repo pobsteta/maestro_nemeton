@@ -610,10 +610,16 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
       }
     }
 
+    # Convertir BD Foret en SpatVector une seule fois par domaine
+    # terra::rasterize gere le clipping automatiquement via l'extent du raster template
+    bdforet_vect <- NULL
+    if (!is.null(bdforet) && nrow(bdforet) > 0) {
+      bdforet_vect <- terra::vect(bdforet)
+    }
+
     # Rasteriser patch par patch
     n_labelled <- 0L
     n_forest <- 0L
-    n_intersect_ok <- 0L
 
     for (tif in tif_files) {
       patch_name <- tools::file_path_sans_ext(basename(tif))
@@ -630,46 +636,20 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
         next
       }
 
-      # Lire l'emprise du patch aerial
+      # Creer le raster label (meme emprise/resolution que le patch)
       ref <- terra::rast(tif)
-      ext_patch <- terra::ext(ref)
-      # Extraire les coordonnees sans noms (terra ext[i] retourne des valeurs
-      # nommees qui causent xmin.xmin dans sf::st_bbox -> tout NA)
-      px_xmin <- unname(terra::xmin(ext_patch))
-      px_xmax <- unname(terra::xmax(ext_patch))
-      px_ymin <- unname(terra::ymin(ext_patch))
-      px_ymax <- unname(terra::ymax(ext_patch))
-
-      # Creer le raster label (250x250 px, 0.2m)
-      label_rast <- terra::rast(
-        xmin = px_xmin, xmax = px_xmax,
-        ymin = px_ymin, ymax = px_ymax,
-        nrows = terra::nrow(ref), ncols = terra::ncol(ref),
-        crs = terra::crs(ref)
-      )
+      label_rast <- terra::rast(ref)
       terra::values(label_rast) <- 9L  # Non-foret par defaut
 
-      if (!is.null(bdforet) && nrow(bdforet) > 0) {
-        # Clipper les polygones BD Foret sur l'emprise du patch
-        patch_bbox <- sf::st_as_sfc(sf::st_bbox(c(
-          xmin = px_xmin, xmax = px_xmax,
-          ymin = px_ymin, ymax = px_ymax
-        ), crs = sf::st_crs(terra::crs(ref))))
-
-        patch_bdforet <- tryCatch({
-          sf::st_intersection(bdforet, patch_bbox)
+      if (!is.null(bdforet_vect)) {
+        # Rasteriser directement - terra gere le clipping via l'extent du template
+        layer <- tryCatch({
+          terra::rasterize(bdforet_vect, label_rast, field = "code_ndp0")
         }, error = function(e) NULL)
 
-        if (!is.null(patch_bdforet) && nrow(patch_bdforet) > 0) {
-          n_intersect_ok <- n_intersect_ok + 1L
-          # Rasteriser les polygones par code NDP0
-          bdforet_vect <- terra::vect(patch_bdforet)
-          codes <- sort(unique(patch_bdforet$code_ndp0), decreasing = TRUE)
-          for (code in codes) {
-            mask_poly <- bdforet_vect[bdforet_vect$code_ndp0 == code, ]
-            if (length(mask_poly) == 0) next
-            layer <- terra::rasterize(mask_poly, label_rast, field = "code_ndp0")
-            valid <- !is.na(terra::values(layer))
+        if (!is.null(layer)) {
+          valid <- !is.na(terra::values(layer))
+          if (any(valid)) {
             vals <- terra::values(label_rast)
             vals[valid] <- terra::values(layer)[valid]
             terra::values(label_rast) <- vals
@@ -693,8 +673,8 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
     }
 
     pct <- if (n_labelled > 0) round(n_forest / n_labelled * 100, 1) else 0
-    message(sprintf("  Domaine %s: %d labellises, %d forestiers (%.1f%%), %d intersections BD Foret non-vides",
-                     dom_label, n_labelled, n_forest, pct, n_intersect_ok))
+    message(sprintf("  Domaine %s: %d labellises, %d forestiers (%.1f%%)",
+                     dom_label, n_labelled, n_forest, pct))
 
     stats <- rbind(stats, data.frame(
       domaine = dom_label,

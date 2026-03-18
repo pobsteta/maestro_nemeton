@@ -256,12 +256,16 @@ message(sprintf("  Bbox BD Foret (apres transform) : xmin=%.0f ymin=%.0f xmax=%.
                 bb_bdforet2["xmin"], bb_bdforet2["ymin"],
                 bb_bdforet2["xmax"], bb_bdforet2["ymax"]))
 
+# Convertir BD Foret en SpatVector une seule fois (terra gere le clipping automatiquement)
+bdforet_vect <- terra::vect(bdforet)
+message(sprintf("  SpatVector BD Foret : %d features, CRS: %s",
+                nrow(bdforet_vect), terra::crs(bdforet_vect, describe = TRUE)$name))
+
 results <- data.frame(
   patch = character(0),
   n_pixels = integer(0),
   n_foret = integer(0),
   pct_foret = numeric(0),
-  n_intersect = integer(0),
   classes = character(0),
   stringsAsFactors = FALSE
 )
@@ -273,68 +277,44 @@ for (i in seq_along(test_tifs)) {
 
   # Lire l'emprise du patch
   ref_patch <- terra::rast(tif)
-  ext_patch <- terra::ext(ref_patch)
 
-  # Extraire les coordonnees sans noms (terra::ext()[i] retourne des valeurs nommees
-  # qui causent xmin.xmin au lieu de xmin dans sf::st_bbox -> tout NA)
-  px_xmin <- unname(terra::xmin(ext_patch))
-  px_xmax <- unname(terra::xmax(ext_patch))
-  px_ymin <- unname(terra::ymin(ext_patch))
-  px_ymax <- unname(terra::ymax(ext_patch))
-
-  # Creer le raster label
-  label_rast <- terra::rast(
-    xmin = px_xmin, xmax = px_xmax,
-    ymin = px_ymin, ymax = px_ymax,
-    nrows = terra::nrow(ref_patch), ncols = terra::ncol(ref_patch),
-    crs = terra::crs(ref_patch)
-  )
+  # Creer le raster label (meme emprise/resolution que le patch)
+  label_rast <- terra::rast(ref_patch)
   terra::values(label_rast) <- 9L  # Non-foret par defaut
-
-  # Intersection avec BD Foret
-  patch_bbox <- sf::st_as_sfc(sf::st_bbox(c(
-    xmin = px_xmin, xmax = px_xmax,
-    ymin = px_ymin, ymax = px_ymax
-  ), crs = sf::st_crs(terra::crs(ref_patch))))
 
   # Debug pour le premier patch
   if (i == 1) {
-    message(sprintf("  DEBUG patch_bbox: %s", paste(sf::st_bbox(patch_bbox), collapse=", ")))
-    message(sprintf("  DEBUG patch_bbox CRS: %s", sf::st_crs(patch_bbox)$input))
-    message(sprintf("  DEBUG bdforet CRS: %s", sf::st_crs(bdforet)$input))
-    message(sprintf("  DEBUG bdforet EPSG: %s", sf::st_crs(bdforet)$epsg))
-    message(sprintf("  DEBUG patch EPSG: %s", sf::st_crs(patch_bbox)$epsg))
-    # Test avec st_intersects d'abord
-    idx <- sf::st_intersects(patch_bbox, bdforet)
-    message(sprintf("  DEBUG st_intersects: %d polygones trouvés", length(idx[[1]])))
-    # Test avec crop aussi
-    bb_crop <- sf::st_crop(bdforet, sf::st_bbox(patch_bbox))
-    message(sprintf("  DEBUG st_crop: %d polygones", nrow(bb_crop)))
+    message(sprintf("  DEBUG patch ext: %s", paste(as.vector(terra::ext(ref_patch)), collapse=", ")))
+    message(sprintf("  DEBUG patch CRS: %s", terra::crs(ref_patch, describe = TRUE)$name))
+    message(sprintf("  DEBUG bdforet_vect ext: %s", paste(as.vector(terra::ext(bdforet_vect)), collapse=", ")))
+    # Test : combien de polygones intersectent ce patch ?
+    patch_ext_vect <- terra::ext(ref_patch)
+    test_crop <- tryCatch(terra::crop(bdforet_vect, patch_ext_vect), error = function(e) {
+      message(sprintf("  DEBUG crop error: %s", e$message))
+      NULL
+    })
+    if (!is.null(test_crop)) {
+      message(sprintf("  DEBUG terra::crop: %d polygones dans l'emprise du patch", nrow(test_crop)))
+    }
   }
 
-  patch_bdforet <- tryCatch({
-    sf::st_intersection(bdforet, patch_bbox)
+  # Rasteriser directement - terra::rasterize ne traite que les polygones
+  # qui intersectent l'extent du raster template (pas besoin de st_intersection)
+  layer <- tryCatch({
+    terra::rasterize(bdforet_vect, label_rast, field = "code_ndp0")
   }, error = function(e) {
-    message(sprintf("  ERREUR intersection: %s", e$message))
+    message(sprintf("  ERREUR rasterize patch %d: %s", i, e$message))
     NULL
   })
 
-  n_intersect <- 0L
   classes_found <- character(0)
-  if (!is.null(patch_bdforet) && nrow(patch_bdforet) > 0) {
-    n_intersect <- nrow(patch_bdforet)
-    # Rasteriser
-    bdforet_vect <- terra::vect(patch_bdforet)
-    codes <- sort(unique(patch_bdforet$code_ndp0), decreasing = TRUE)
-    classes_found <- as.character(codes)
-    for (code in codes) {
-      mask_poly <- bdforet_vect[bdforet_vect$code_ndp0 == code, ]
-      if (length(mask_poly) == 0) next
-      layer <- terra::rasterize(mask_poly, label_rast, field = "code_ndp0")
-      valid <- !is.na(terra::values(layer))
+  if (!is.null(layer)) {
+    valid <- !is.na(terra::values(layer))
+    if (any(valid)) {
       vals <- terra::values(label_rast)
       vals[valid] <- terra::values(layer)[valid]
       terra::values(label_rast) <- vals
+      classes_found <- as.character(sort(unique(terra::values(layer)[valid])))
     }
   }
 
@@ -354,14 +334,13 @@ for (i in seq_along(test_tifs)) {
     n_pixels = n_pixels,
     n_foret = n_foret,
     pct_foret = pct_foret,
-    n_intersect = n_intersect,
     classes = paste(classes_found, collapse = ","),
     stringsAsFactors = FALSE
   ))
 
   status <- if (pct_foret > 5) "OK" else if (pct_foret > 0) "faible" else "VIDE"
-  message(sprintf("  [%d/%d] %s : %.1f%% foret (%d polygones BD Foret, classes: %s) [%s]",
-                   i, n_test, patch_name, pct_foret, n_intersect,
+  message(sprintf("  [%d/%d] %s : %.1f%% foret (classes: %s) [%s]",
+                   i, n_test, patch_name, pct_foret,
                    paste(classes_found, collapse = ","), status))
 }
 
