@@ -297,9 +297,27 @@ for (i in seq_along(test_tifs)) {
     ymin = px_ymin, ymax = px_ymax
   ), crs = sf::st_crs(terra::crs(ref_patch))))
 
+  # Debug pour le premier patch
+  if (i == 1) {
+    message(sprintf("  DEBUG patch_bbox: %s", paste(sf::st_bbox(patch_bbox), collapse=", ")))
+    message(sprintf("  DEBUG patch_bbox CRS: %s", sf::st_crs(patch_bbox)$input))
+    message(sprintf("  DEBUG bdforet CRS: %s", sf::st_crs(bdforet)$input))
+    message(sprintf("  DEBUG bdforet EPSG: %s", sf::st_crs(bdforet)$epsg))
+    message(sprintf("  DEBUG patch EPSG: %s", sf::st_crs(patch_bbox)$epsg))
+    # Test avec st_intersects d'abord
+    idx <- sf::st_intersects(patch_bbox, bdforet)
+    message(sprintf("  DEBUG st_intersects: %d polygones trouvés", length(idx[[1]])))
+    # Test avec crop aussi
+    bb_crop <- sf::st_crop(bdforet, sf::st_bbox(patch_bbox))
+    message(sprintf("  DEBUG st_crop: %d polygones", nrow(bb_crop)))
+  }
+
   patch_bdforet <- tryCatch({
     sf::st_intersection(bdforet, patch_bbox)
-  }, error = function(e) NULL)
+  }, error = function(e) {
+    message(sprintf("  ERREUR intersection: %s", e$message))
+    NULL
+  })
 
   n_intersect <- 0L
   classes_found <- character(0)
