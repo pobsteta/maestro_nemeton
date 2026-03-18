@@ -229,23 +229,30 @@ test_tifs <- tif_files[1:n_test]
 label_dir <- file.path(flair_dir, "labels_ndp0", DOMAINE)
 dir.create(label_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Nettoyer les geometries avec coordonnees NA avant toute operation spatiale
-# Filtrer SANS appeler de fonctions sf spatiales (qui plantent sur NA)
-geom <- sf::st_geometry(bdforet)
-coords_ok <- vapply(seq_along(geom), function(i) {
-  g <- geom[[i]]
-  if (inherits(g, "POINT") && length(unclass(g)) == 0) return(FALSE)
-  raw <- tryCatch(unlist(unclass(g), recursive = TRUE), error = function(e) NA_real_)
-  if (length(raw) == 0) return(FALSE)
-  !anyNA(raw)
+# Nettoyer les geometries problematiques avant toute operation spatiale
+# Tester chaque geometrie individuellement car st_make_valid/st_transform
+# en bloc echoue si UNE SEULE geometrie contient des coordonnees NA
+message("  Nettoyage des geometries...")
+n_before <- nrow(bdforet)
+keep <- vapply(seq_len(nrow(bdforet)), function(i) {
+  tryCatch({
+    g <- sf::st_geometry(bdforet[i, ])
+    # Tester si st_make_valid + st_transform passe sans erreur
+    g_valid <- sf::st_make_valid(g)
+    if (sf::st_is_empty(g_valid)) return(FALSE)
+    TRUE
+  }, error = function(e) FALSE)
 }, logical(1))
-if (any(!coords_ok)) {
-  message(sprintf("  %d geometries invalides/NA supprimees sur %d",
-                   sum(!coords_ok), length(coords_ok)))
-  bdforet <- bdforet[coords_ok, ]
+if (any(!keep)) {
+  message(sprintf("  %d geometries problematiques supprimees sur %d",
+                   sum(!keep), n_before))
+  bdforet <- bdforet[keep, ]
 }
+
+# Maintenant st_make_valid et st_transform sont surs
 bdforet <- sf::st_make_valid(bdforet)
 bdforet <- bdforet[!sf::st_is_empty(bdforet), ]
+message(sprintf("  %d geometries valides", nrow(bdforet)))
 
 # Transformer bdforet dans le CRS des patches si necessaire
 patch_crs <- sf::st_crs(crs_str)
