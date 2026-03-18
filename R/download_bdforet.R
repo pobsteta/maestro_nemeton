@@ -275,24 +275,31 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
   }
 
   # Nettoyer les geometries AVANT toute operation spatiale
-  # Le WFS GeoJSON peut contenir des geometries avec coordonnees NA
-  bdforet <- sf::st_make_valid(bdforet)
-  valid_mask <- !sf::st_is_empty(bdforet)
-  # Filtrer aussi les geometries dont les coordonnees contiennent des NA
-  coords_ok <- vapply(sf::st_geometry(bdforet), function(g) {
-    coords <- tryCatch(sf::st_coordinates(g), error = function(e) NULL)
-    !is.null(coords) && !anyNA(coords)
+  # Le WFS GeoJSON peut contenir des geometries vides ou avec coordonnees NA
+  # Filtrer SANS appeler de fonctions sf spatiales (qui plantent sur NA)
+  geom <- sf::st_geometry(bdforet)
+  coords_ok <- vapply(seq_along(geom), function(i) {
+    g <- geom[[i]]
+    # Verifier si la geometrie est vide
+    if (inherits(g, "POINT") && length(unclass(g)) == 0) return(FALSE)
+    # Extraire les coordonnees brutes sans passer par st_coordinates
+    raw <- tryCatch(unlist(unclass(g), recursive = TRUE), error = function(e) NA_real_)
+    if (length(raw) == 0) return(FALSE)
+    !anyNA(raw)
   }, logical(1))
-  valid_mask <- valid_mask & coords_ok
-  if (any(!valid_mask)) {
+  if (any(!coords_ok)) {
     message(sprintf("  %d geometries invalides/NA supprimees sur %d",
-                     sum(!valid_mask), length(valid_mask)))
-    bdforet <- bdforet[valid_mask, ]
+                     sum(!coords_ok), length(coords_ok)))
+    bdforet <- bdforet[coords_ok, ]
   }
   if (nrow(bdforet) == 0) {
     warning("Aucun polygone BD Foret valide apres nettoyage")
     return(NULL)
   }
+
+  # Reparer les geometries (anneaux non fermes, etc.) puis reprojeter
+  bdforet <- sf::st_make_valid(bdforet)
+  bdforet <- bdforet[!sf::st_is_empty(bdforet), ]
 
   # Reprojeter en Lambert-93
   bdforet <- sf::st_transform(bdforet, 2154)
