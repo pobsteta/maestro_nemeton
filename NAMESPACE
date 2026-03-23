@@ -95,5 +95,6 @@ export(cross_landcover_dem)
 export(evaluer_predictions)
 export(export_raster)
 
+importFrom(happign,get_wfs)
 importFrom(utils,read.csv)
 importFrom(utils,write.csv)

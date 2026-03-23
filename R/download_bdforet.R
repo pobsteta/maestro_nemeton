@@ -1,6 +1,6 @@
 # =============================================================================
 # Telechargement et rasterisation de la BD Foret V2 (IGN)
-# Source : WFS Geoplateforme (https://data.geopf.fr/wfs)
+# Source : WFS Geoplateforme via happign
 # =============================================================================
 
 # --- Mapping BD Foret V2 -> classes NDP0 (10 classes) ---
@@ -112,24 +112,67 @@ tfv_to_ndp0 <- function(code_tfv) {
 }
 
 
-# --- Telechargement BD Foret V2 via WFS ---
+# --- Telechargement BD Foret V2 via WFS direct ---
 
-#' Telecharger la BD Foret V2 pour une AOI via WFS
+#' Telecharger une tuile BD Foret V2 via requete WFS directe
 #'
-#' Interroge le service WFS de la Geoplateforme IGN pour telecharger
-#' les polygones de la BD Foret V2 couvrant la zone d'interet.
-#' Les polygones sont reprojectes en Lambert-93 et les codes TFV
-#' sont convertis en classes NDP0.
+#' Requete WFS GetFeature directe vers la Geoplateforme IGN (sans happign).
+#' Plus fiable que happign pour les grandes bbox.
 #'
-#' @param aoi sf object (AOI en Lambert-93)
+#' @param bbox_vals Vecteur numerique c(xmin, ymin, xmax, ymax) en WGS84
+#' @param typename Nom de la couche WFS
+#' @param max_features Nombre max de features par requete (defaut: 10000)
+#' @return sf data.frame ou NULL
+#' @keywords internal
+.wfs_get_bdforet <- function(bbox_vals, typename, max_features = 10000) {
+  base_url <- "https://data.geopf.fr/wfs/ows"
+  bbox_str <- paste(bbox_vals, collapse = ",")
+
+  wfs_url <- paste0(
+    base_url,
+    "?SERVICE=WFS",
+    "&VERSION=2.0.0",
+    "&REQUEST=GetFeature",
+    "&TYPENAME=", typename,
+    "&BBOX=", bbox_str, ",EPSG:4326",
+    "&SRSNAME=EPSG:4326",
+    "&OUTPUTFORMAT=application/json",
+    "&COUNT=", max_features
+  )
+
+  h <- curl::new_handle()
+  curl::handle_setopt(h, timeout = 120)
+  resp <- curl::curl_fetch_memory(wfs_url, handle = h)
+
+  if (resp$status_code != 200) {
+    warning(sprintf("WFS HTTP %d pour %s", resp$status_code, typename))
+    return(NULL)
+  }
+
+  geojson <- rawToChar(resp$content)
+  if (nchar(geojson) < 50) return(NULL)
+
+  result <- sf::st_read(geojson, quiet = TRUE)
+  if (nrow(result) == 0) return(NULL)
+  result
+}
+
+
+#' Telecharger la BD Foret V2 pour une AOI
+#'
+#' Telecharge les polygones de la BD Foret V2 depuis le service WFS de la
+#' Geoplateforme IGN via requete directe. Les polygones sont reprojectes
+#' en Lambert-93 et les codes TFV sont convertis en classes NDP0.
+#'
+#' Pour les grandes AOI (> 0.5 degre), la bbox est decoupee en tuiles.
+#'
+#' @param aoi sf object (AOI en Lambert-93 ou WGS84)
 #' @param output_dir Repertoire de sortie
-#' @param wfs_url URL du service WFS (defaut: Geoplateforme)
 #' @param layer_name Nom de la couche WFS BD Foret
 #' @return sf data.frame avec les polygones BD Foret et la colonne `code_ndp0`
 #' @export
 download_bdforet_for_aoi <- function(aoi, output_dir,
-                                      wfs_url = "https://data.geopf.fr/wfs/ows",
-                                      layer_name = "BDFORET_V2:formation_vegetale") {
+                                      layer_name = "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale") {
   message("=== Telechargement BD Foret V2 via WFS ===")
 
   cache_path <- file.path(output_dir, "bdforet_v2.gpkg")
@@ -144,78 +187,109 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
   # Bbox en WGS84 pour la requete WFS
   aoi_wgs84 <- sf::st_transform(aoi, 4326)
   bbox_wgs84 <- sf::st_bbox(aoi_wgs84)
-  bbox_str <- sprintf("%f,%f,%f,%f,EPSG:4326",
-                       bbox_wgs84["ymin"], bbox_wgs84["xmin"],
-                       bbox_wgs84["ymax"], bbox_wgs84["xmax"])
 
-  # Construire l'URL GetFeature
-  wfs_params <- list(
-    SERVICE = "WFS",
-    VERSION = "2.0.0",
-    REQUEST = "GetFeature",
-    TYPENAMES = layer_name,
-    BBOX = bbox_str,
-    OUTPUTFORMAT = "application/json",
-    COUNT = "50000"
-  )
-  query_str <- paste(names(wfs_params), wfs_params, sep = "=", collapse = "&")
-  url <- paste0(wfs_url, "?", query_str)
+  # Extraire les valeurs numeriques sans noms
+  bxmin <- unname(bbox_wgs84["xmin"])
+  bymin <- unname(bbox_wgs84["ymin"])
+  bxmax <- unname(bbox_wgs84["xmax"])
+  bymax <- unname(bbox_wgs84["ymax"])
+
+  # Decoupe spatiale : si la bbox depasse ~0.5 degre dans une dimension,
+  # on la fractionne en tuiles pour eviter les timeouts du WFS
+  bbox_width <- bxmax - bxmin
+  bbox_height <- bymax - bymin
+  tile_size <- 0.5  # degres
+
+  x_breaks <- seq(bxmin, bxmax, by = tile_size)
+  if (tail(x_breaks, 1) < bxmax) x_breaks <- c(x_breaks, bxmax)
+  y_breaks <- seq(bymin, bymax, by = tile_size)
+  if (tail(y_breaks, 1) < bymax) y_breaks <- c(y_breaks, bymax)
+
+  tiles <- list()
+  for (i in seq_len(length(x_breaks) - 1)) {
+    for (j in seq_len(length(y_breaks) - 1)) {
+      tiles <- c(tiles, list(c(x_breaks[i], y_breaks[j],
+                                x_breaks[i + 1], y_breaks[j + 1])))
+    }
+  }
+
+  n_tiles <- length(tiles)
+  if (n_tiles > 1) {
+    message(sprintf("  Bbox large (%.2f x %.2f deg) -> decoupe en %d tuiles",
+                     bbox_width, bbox_height, n_tiles))
+  }
 
   message(sprintf("  Couche WFS: %s", layer_name))
   message(sprintf("  Bbox: %.4f, %.4f, %.4f, %.4f (WGS84)",
-                   bbox_wgs84["xmin"], bbox_wgs84["ymin"],
-                   bbox_wgs84["xmax"], bbox_wgs84["ymax"]))
+                   bxmin, bymin, bxmax, bymax))
 
-  # Telecharger le GeoJSON
-  tmp_geojson <- tempfile(fileext = ".geojson")
-  tryCatch({
-    h <- curl::new_handle()
-    curl::handle_setopt(h, followlocation = TRUE, timeout = 120L)
-    curl::curl_download(url, tmp_geojson, handle = h)
-  }, error = function(e) {
-    # Fallback : essayer d'autres noms de couche
-    alt_layers <- c(
-      "LANDUSE.FORESTINVENTORY.V2:formation_vegetale",
-      "bdforet_v2:formation_vegetale",
-      "IGNF_BDFORET_V2:formation_vegetale"
-    )
-    success <- FALSE
-    for (alt in alt_layers) {
-      message(sprintf("  Essai couche alternative: %s", alt))
-      alt_params <- wfs_params
-      alt_params$TYPENAMES <- alt
-      alt_query <- paste(names(alt_params), alt_params, sep = "=", collapse = "&")
-      alt_url <- paste0(wfs_url, "?", alt_query)
-      tryCatch({
-        curl::curl_download(alt_url, tmp_geojson, handle = h)
-        success <- TRUE
-        break
-      }, error = function(e2) NULL)
-    }
-    if (!success) {
-      stop(sprintf("Echec WFS BD Foret: %s\nEssayez de telecharger manuellement depuis https://geoservices.ign.fr/bdforet",
-                    e$message))
-    }
-  })
+  # Couches a essayer, dans l'ordre
+  all_layers <- unique(c(
+    layer_name,
+    "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale",
+    "BDFORET_V2:formation_vegetale"
+  ))
 
-  # Lire le GeoJSON
-  bdforet <- tryCatch({
-    sf::st_read(tmp_geojson, quiet = TRUE)
-  }, error = function(e) {
-    stop(sprintf("Erreur lecture GeoJSON BD Foret: %s", e$message))
-  })
-  unlink(tmp_geojson)
+  # Telecharger via requete WFS directe avec gestion des tuiles
+  bdforet <- NULL
+  for (lyr in all_layers) {
+    message(sprintf("  Essai couche: %s", lyr))
+    tile_results <- list()
+    for (k in seq_along(tiles)) {
+      tile <- tiles[[k]]
+      if (n_tiles > 1) {
+        message(sprintf("  Tuile %d/%d [%.4f,%.4f - %.4f,%.4f]",
+                         k, n_tiles, tile[1], tile[2], tile[3], tile[4]))
+      }
+      tile_data <- tryCatch({
+        .wfs_get_bdforet(tile, lyr)
+      }, error = function(e) {
+        message(sprintf("    Tuile %d echec: %s", k, e$message))
+        NULL
+      })
+      if (!is.null(tile_data) && inherits(tile_data, "sf") && nrow(tile_data) > 0) {
+        tile_results <- c(tile_results, list(tile_data))
+      }
+    }
+    if (length(tile_results) > 0) {
+      bdforet <- tryCatch(do.call(rbind, tile_results), error = function(e) {
+        message(sprintf("  Erreur combinaison tuiles: %s", e$message))
+        tile_results[[1]]
+      })
+    }
+    if (!is.null(bdforet) && inherits(bdforet, "sf") && nrow(bdforet) > 0) {
+      message(sprintf("  %d polygones telecharges via %s", nrow(bdforet), lyr))
+      break
+    }
+    bdforet <- NULL
+  }
+
+  if (is.null(bdforet) || (inherits(bdforet, "sf") && nrow(bdforet) == 0)) {
+    stop("Echec telechargement BD Foret via WFS.\n",
+         "Verifiez votre connexion et le service WFS IGN (https://data.geopf.fr/wfs/ows).")
+  }
 
   if (nrow(bdforet) == 0) {
     warning("Aucun polygone BD Foret V2 trouve pour cette AOI")
     return(NULL)
   }
 
+  # Reparer les geometries invalides
+  bdforet <- sf::st_make_valid(bdforet)
+  bdforet <- bdforet[!sf::st_is_empty(bdforet), ]
+
   # Reprojeter en Lambert-93
   bdforet <- sf::st_transform(bdforet, 2154)
 
-  # Clipper sur l'AOI
-  bdforet <- sf::st_intersection(bdforet, sf::st_union(aoi))
+  # Clipper sur l'AOI (s'assurer que les CRS correspondent)
+  aoi_clip <- sf::st_transform(aoi, sf::st_crs(bdforet))
+  bdforet <- tryCatch(
+    sf::st_intersection(bdforet, sf::st_union(aoi_clip)),
+    error = function(e) {
+      message(sprintf("  Intersection AOI echec: %s -> utilisation sans clip", e$message))
+      bdforet
+    }
+  )
 
   # Identifier la colonne TFV
   tfv_col <- NULL
@@ -240,7 +314,12 @@ download_bdforet_for_aoi <- function(aoi, output_dir,
 
   if (is.null(tfv_col)) {
     warning("Colonne CODE_TFV non trouvee dans la BD Foret. ",
-            "Colonnes disponibles: ", paste(names(bdforet), collapse = ", "))
+            "Colonnes disponibles: ", paste(names(bdforet), collapse = ", "),
+            "\n  Premiers valeurs par colonne:")
+    for (col in setdiff(names(bdforet), "geometry")) {
+      vals <- head(unique(as.character(bdforet[[col]])), 5)
+      warning(sprintf("    %s: %s", col, paste(vals, collapse = ", ")))
+    }
     bdforet$code_ndp0 <- 9L  # Non-foret par defaut
   } else {
     message(sprintf("  Colonne TFV: %s", tfv_col))
@@ -346,7 +425,7 @@ rasteriser_bdforet <- function(bdforet, reference, output_dir = "outputs") {
 
 #' Telecharger et rasteriser la BD Foret V2 pour une AOI
 #'
-#' Fonction combinee : telecharge les polygones via WFS puis rasterise
+#' Fonction combinee : telecharge les polygones via happign puis rasterise
 #' a la resolution du raster de reference (0.2m).
 #'
 #' @param aoi sf object (AOI en Lambert-93)
@@ -448,7 +527,7 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
       r <- tryCatch(terra::rast(tif), error = function(e) NULL)
       if (is.null(r)) next
       e <- terra::ext(r)
-      ext_vals <- as.vector(e)
+      ext_vals <- c(e[1], e[2], e[3], e[4])
       if (anyNA(ext_vals) || any(!is.finite(ext_vals))) {
         warning(sprintf("  Patch ignore (extent invalide): %s", basename(tif)))
         next
@@ -467,11 +546,23 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
     }
 
     # Creer un sf pour la bbox englobante du domaine
+    # NB: utiliser les accesseurs explicites terra::xmin() etc.
+    # pour eviter toute ambiguite d'ordre avec as.vector()
     crs_str <- terra::crs(terra::rast(tif_files[1]))
-    bbox_poly <- sf::st_as_sfc(sf::st_bbox(c(
-      xmin = bbox_all[1], xmax = bbox_all[2],
-      ymin = bbox_all[3], ymax = bbox_all[4]
-    ), crs = sf::st_crs(crs_str)))
+    bbox_vals <- c(
+      xmin = terra::xmin(bbox_all),
+      ymin = terra::ymin(bbox_all),
+      xmax = terra::xmax(bbox_all),
+      ymax = terra::ymax(bbox_all)
+    )
+    if (anyNA(bbox_vals) || any(!is.finite(bbox_vals))) {
+      warning(sprintf("  Domaine %s: bbox invalide apres union, ignore", dom_label))
+      next
+    }
+    message(sprintf("  Bbox domaine: xmin=%.0f ymin=%.0f xmax=%.0f ymax=%.0f",
+                     bbox_vals["xmin"], bbox_vals["ymin"],
+                     bbox_vals["xmax"], bbox_vals["ymax"]))
+    bbox_poly <- sf::st_as_sfc(sf::st_bbox(bbox_vals, crs = sf::st_crs(crs_str)))
     aoi_domaine <- sf::st_sf(geometry = bbox_poly)
 
     # Telecharger la BD Foret V2 pour tout le domaine
@@ -483,7 +574,16 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
     if (file.exists(cache_path)) {
       message("  Cache BD Foret: ", cache_path)
       bdforet <- sf::st_read(cache_path, quiet = TRUE)
-    } else {
+      # Rejeter les caches vides ou sans foret (echec precedent)
+      if (nrow(bdforet) == 0 || !("code_ndp0" %in% names(bdforet)) ||
+          all(bdforet$code_ndp0 == 9L)) {
+        warning(sprintf("  Cache invalide (0 polygones forestiers): %s -> re-telechargement",
+                         cache_path))
+        file.remove(cache_path)
+        bdforet <- NULL
+      }
+    }
+    if (is.null(bdforet)) {
       bdforet <- tryCatch({
         download_bdforet_for_aoi(aoi_domaine, cache_dir)
       }, error = function(e) {
@@ -493,6 +593,28 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
       if (!is.null(bdforet)) {
         sf::st_write(bdforet, cache_path, delete_dsn = TRUE, quiet = TRUE)
       }
+    }
+
+    # Diagnostic : afficher l'etat de bdforet
+    if (is.null(bdforet) || nrow(bdforet) == 0) {
+      warning(sprintf("  Domaine %s: BD Foret vide ou NULL -> tous les patches seront non-foret", dom_label))
+    } else {
+      message(sprintf("  BD Foret chargee: %d polygones, CRS=%s",
+                       nrow(bdforet), sf::st_crs(bdforet)$input))
+      # Verifier que les CRS correspondent
+      patch_crs <- sf::st_crs(sf::st_crs(crs_str))
+      bdforet_crs <- sf::st_crs(bdforet)
+      if (!identical(patch_crs$wkt, bdforet_crs$wkt)) {
+        message("  [DIAG] CRS patches vs bdforet different, transformation automatique dans l'intersection")
+        bdforet <- sf::st_transform(bdforet, patch_crs)
+      }
+    }
+
+    # Convertir BD Foret en SpatVector une seule fois par domaine
+    # terra::rasterize gere le clipping automatiquement via l'extent du raster template
+    bdforet_vect <- NULL
+    if (!is.null(bdforet) && nrow(bdforet) > 0) {
+      bdforet_vect <- terra::vect(bdforet)
     }
 
     # Rasteriser patch par patch
@@ -514,39 +636,25 @@ labelliser_flair_bdforet <- function(flair_dir = "data/flair_hub",
         next
       }
 
-      # Lire l'emprise du patch aerial
+      # Creer le raster label mono-bande (meme emprise/resolution que le patch)
       ref <- terra::rast(tif)
-      ext_patch <- terra::ext(ref)
-
-      # Creer le raster label (250x250 px, 0.2m)
       label_rast <- terra::rast(
-        xmin = ext_patch[1], xmax = ext_patch[2],
-        ymin = ext_patch[3], ymax = ext_patch[4],
-        nrows = terra::nrow(ref), ncols = terra::ncol(ref),
-        crs = terra::crs(ref)
+        ext = terra::ext(ref),
+        res = terra::res(ref),
+        crs = terra::crs(ref),
+        nlyrs = 1
       )
       terra::values(label_rast) <- 9L  # Non-foret par defaut
 
-      if (!is.null(bdforet) && nrow(bdforet) > 0) {
-        # Clipper les polygones BD Foret sur l'emprise du patch
-        patch_bbox <- sf::st_as_sfc(sf::st_bbox(c(
-          xmin = ext_patch[1], xmax = ext_patch[2],
-          ymin = ext_patch[3], ymax = ext_patch[4]
-        ), crs = sf::st_crs(terra::crs(ref))))
-
-        patch_bdforet <- tryCatch({
-          sf::st_intersection(bdforet, patch_bbox)
+      if (!is.null(bdforet_vect)) {
+        # Rasteriser directement - terra gere le clipping via l'extent du template
+        layer <- tryCatch({
+          terra::rasterize(bdforet_vect, label_rast, field = "code_ndp0")
         }, error = function(e) NULL)
 
-        if (!is.null(patch_bdforet) && nrow(patch_bdforet) > 0) {
-          # Rasteriser les polygones par code NDP0
-          bdforet_vect <- terra::vect(patch_bdforet)
-          codes <- sort(unique(patch_bdforet$code_ndp0), decreasing = TRUE)
-          for (code in codes) {
-            mask_poly <- bdforet_vect[bdforet_vect$code_ndp0 == code, ]
-            if (length(mask_poly) == 0) next
-            layer <- terra::rasterize(mask_poly, label_rast, field = "code_ndp0")
-            valid <- !is.na(terra::values(layer))
+        if (!is.null(layer)) {
+          valid <- !is.na(terra::values(layer))
+          if (any(valid)) {
             vals <- terra::values(label_rast)
             vals[valid] <- terra::values(layer)[valid]
             terra::values(label_rast) <- vals

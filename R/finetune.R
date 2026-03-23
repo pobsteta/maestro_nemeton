@@ -586,6 +586,10 @@ download_treesatai <- function(output_dir = "data/TreeSatAI",
   for (zp in zips) {
     tryCatch({
       utils::unzip(zp, exdir = tmp_extract)
+      # Supprimer le ZIP apres extraction pour liberer l'espace disque
+      zip_size <- file.size(zp) / 1e6
+      unlink(zp)
+      message(sprintf("  ZIP supprime: %s (%.0f Mo liberes)", basename(zp), zip_size))
     }, error = function(e) {
       message(sprintf("  ERREUR extraction: %s - %s", basename(zp), e$message))
     })

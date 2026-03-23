@@ -59,8 +59,15 @@ hf_download_file <- function(repo_id, filename, dest_dir, token = NULL) {
   dest_file <- file.path(dest_dir, basename(filename))
 
   if (file.exists(dest_file)) {
-    message("  Deja telecharge: ", basename(filename))
-    return(dest_file)
+    # Verifier que le fichier n'est pas tronque (< 1 Ko = probablement corrompu)
+    fsize <- file.size(dest_file)
+    if (!is.na(fsize) && fsize > 1024) {
+      message("  Deja telecharge: ", basename(filename), " (", round(fsize / 1e6, 1), " Mo)")
+      return(dest_file)
+    } else {
+      message("  Fichier tronque detecte (", fsize, " octets), re-telechargement: ", basename(filename))
+      unlink(dest_file)
+    }
   }
 
   h <- curl::new_handle()
@@ -162,6 +169,32 @@ download_flair_subset <- function(modalite, domaine = NULL,
     return(invisible(NULL))
   }
 
+  # Verifier l'integrite du ZIP avant extraction
+  zip_ok <- tryCatch({
+    contents <- utils::unzip(zip_path, list = TRUE)
+    nrow(contents) > 0
+  }, error = function(e) FALSE, warning = function(w) FALSE)
+
+  if (!zip_ok) {
+    message(sprintf("  ZIP corrompu, re-telechargement: %s", basename(zip_path)))
+    unlink(zip_path)
+    hf_download_file(repo_id, zip_name, zip_dir, token)
+    if (!file.exists(zip_path)) {
+      warning(sprintf("Echec re-telechargement: %s", zip_name))
+      return(invisible(NULL))
+    }
+    # Re-verifier
+    zip_ok2 <- tryCatch({
+      contents <- utils::unzip(zip_path, list = TRUE)
+      nrow(contents) > 0
+    }, error = function(e) FALSE, warning = function(w) FALSE)
+    if (!zip_ok2) {
+      warning(sprintf("ZIP toujours corrompu apres re-telechargement: %s", basename(zip_path)))
+      unlink(zip_path)
+      return(invisible(NULL))
+    }
+  }
+
   # Extraire
   dir.create(extract_dir, recursive = TRUE, showWarnings = FALSE)
   message(sprintf("  Extraction dans: %s", extract_dir))
@@ -170,6 +203,13 @@ download_flair_subset <- function(modalite, domaine = NULL,
   # Compter les TIF extraits
   tifs <- list.files(extract_dir, pattern = "\\.tif$", recursive = TRUE)
   message(sprintf("  %d fichiers TIF extraits", length(tifs)))
+
+  # Supprimer le ZIP pour liberer l'espace disque
+  if (file.exists(zip_path)) {
+    zip_size <- file.size(zip_path) / 1e6
+    unlink(zip_path)
+    message(sprintf("  ZIP supprime: %s (%.0f Mo liberes)", basename(zip_path), zip_size))
+  }
 
   invisible(extract_dir)
 }

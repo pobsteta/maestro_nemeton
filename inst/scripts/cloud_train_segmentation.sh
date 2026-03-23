@@ -199,21 +199,38 @@ print(path)
 ")
 echo "Checkpoint: $CHECKPOINT"
 
-# --- Installer R si necessaire (pour FLAIR-HUB ou AOI) ---
+# --- Installer R et les dependances systeme (pour FLAIR-HUB ou AOI) ---
 install_r_deps() {
-    if ! command -v Rscript &>/dev/null; then
-        echo "  Installation de R..."
-        apt-get update -qq
-        apt-get install -y -qq r-base libgdal-dev libproj-dev libgeos-dev \
-            libsqlite3-dev libcurl4-openssl-dev libssl-dev 2>/dev/null
-    fi
+    echo "  Verification des dependances systeme..."
+    apt-get update -qq
+
+    # Toujours installer les libs systeme geospatiales (necessaires pour sf/terra)
+    # meme si R est deja present sur l'image GPU
+    echo "  Installation des bibliotheques systeme geospatiales..."
+    apt-get install -y -qq \
+        r-base \
+        libgdal-dev libproj-dev libgeos-dev libudunits2-dev \
+        libsqlite3-dev libcurl4-openssl-dev libssl-dev \
+        libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
+        libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
 
     Rscript -e "
     pkgs <- c('sf', 'terra', 'curl', 'jsonlite', 'fs')
     missing <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
     if (length(missing) > 0) {
-        install.packages(missing, repos = 'https://cloud.r-project.org', quiet = TRUE)
+        cat('  Installation de', length(missing), 'packages R:', paste(missing, collapse=', '), '\n')
+        install.packages(missing, repos = 'https://cloud.r-project.org', Ncpus = parallel::detectCores())
+    } else {
+        cat('  Tous les packages R sont deja installes\n')
     }
+
+    # Verification finale : sf est critique pour la labellisation
+    failed <- pkgs[!sapply(pkgs, requireNamespace, quietly = TRUE)]
+    if (length(failed) > 0) {
+        stop('ERREUR: packages R non installes: ', paste(failed, collapse=', '),
+             '. Verifiez les libs systeme (libgdal-dev, libgeos-dev, libproj-dev, libudunits2-dev)')
+    }
+    cat('  Tous les packages R sont prets\n')
     "
 }
 

@@ -28,7 +28,8 @@ Imports:
     fs,
     jsonlite,
     reticulate,
-    rstac
+    rstac,
+    happign
 Suggests:
     ggplot2,
     patchwork,
