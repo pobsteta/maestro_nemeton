@@ -6,7 +6,7 @@
 #'
 #' Le modele MAESTRO supporte 6 modalites :
 #'   - aerial : RGBI 4 bandes (0.2m) — ortho IGN
-#'   - dem    : DSM+DTM 2 bandes (1m, resample 0.2m)
+#'   - dem    : 2 bandes au choix (1m natif) parmi DSM, DTM, SLOPE, ASPECT, TPI, TWI
 #'   - s2     : Sentinel-2 L2A 10 bandes (10m)
 #'   - s1_asc : Sentinel-1 ascending VV+VH 2 bandes (10m)
 #'   - s1_des : Sentinel-1 descending VV+VH 2 bandes (10m)
@@ -35,6 +35,9 @@
 #'   "printemps", "automne", "annee", ou vecteur de 2 mois c(debut, fin)
 #' @param max_scenes_par_annee Nombre max de scenes a retenir par annee
 #'   pour le composite (defaut: 3, les moins nuageuses)
+#' @param dem_channels Vecteur de 2 noms de canaux DEM parmi
+#'   `c("DSM", "DTM", "SLOPE", "ASPECT", "TPI", "TWI")`.
+#'   Defaut: `c("SLOPE", "TWI")`. Le DEM est conserve a 1m de resolution.
 #' @param gpu Utiliser le GPU CUDA (defaut: FALSE)
 #' @param token Token Hugging Face (optionnel)
 #' @return Liste invisible avec `grille` (sf) et `raster` (SpatRaster)
@@ -48,20 +51,21 @@
 #' maestro_pipeline("data/aoi.gpkg",
 #'                   checkpoint = "outputs/training/maestro_treesatai_best.pt")
 #'
+#' # DEM avec pente + TWI (defaut, optimal pour la foret)
+#' maestro_pipeline("data/aoi.gpkg", dem_channels = c("SLOPE", "TWI"))
+#'
+#' # DEM classique DSM + DTM
+#' maestro_pipeline("data/aoi.gpkg", dem_channels = c("DSM", "DTM"))
+#'
+#' # DEM avec TPI + orientation
+#' maestro_pipeline("data/aoi.gpkg", dem_channels = c("TPI", "ASPECT"))
+#'
 #' # Toutes les modalites : aerial + DEM + S2 + S1
 #' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE, use_s1 = TRUE)
-#'
-#' # Avec une date cible pour Sentinel
-#' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE,
-#'                   date_sentinel = "2024-07-15")
 #'
 #' # Composite multi-annuel (3 etes, median pixel par pixel)
 #' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE, use_s1 = TRUE,
 #'                   annees_sentinel = 2022:2024, saison = "ete")
-#'
-#' # Composite sur 5 annees, saison complete
-#' maestro_pipeline("data/aoi.gpkg", use_s2 = TRUE, use_s1 = TRUE,
-#'                   annees_sentinel = 2020:2024, saison = "annee")
 #' }
 maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               output_dir = "outputs",
@@ -78,6 +82,7 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
                               annees_sentinel = NULL,
                               saison = "ete",
                               max_scenes_par_annee = 3L,
+                              dem_channels = c("SLOPE", "TWI"),
                               gpu = FALSE,
                               token = NULL) {
   # --- Validation des entrees ---
@@ -155,19 +160,19 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
   terra::writeRaster(rgbi, rgbi_path, overwrite = TRUE)
   message(sprintf("RGBI sauvegarde: %s", rgbi_path))
 
-  # 4. Telecharger le DEM (DSM + DTM, 2 bandes)
-  dem_data <- download_dem_for_aoi(aoi, output_dir, rgbi = rgbi)
+  # 4. Telecharger le DEM (2 canaux au choix, 1m natif)
+  dem_data <- download_dem_for_aoi(aoi, output_dir, dem_channels = dem_channels)
 
   # Preparer les modalites disponibles
   modalites <- list(aerial = rgbi)
   modalites_noms <- c("aerial")
 
   if (!is.null(dem_data)) {
-    dem <- aligner_dem_sur_rgbi(dem_data$dem, rgbi)
-    modalites$dem <- dem
+    modalites$dem <- dem_data$dem
     modalites_noms <- c(modalites_noms, "dem")
-    message(sprintf("  DEM: %d bandes (source DSM: %s)",
-                     terra::nlyr(dem), dem_data$dsm_source))
+    message(sprintf("  DEM: %s a 1m (source DSM: %s)",
+                     paste(dem_data$dem_channels, collapse = " + "),
+                     dem_data$dsm_source))
   } else {
     message("  DEM non disponible, utilisation de aerial seul")
   }
@@ -298,25 +303,26 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
 #' @param date_sentinel Date cible pour les images Sentinel
 #' @param annees_sentinel Vecteur d'annees pour un composite multi-annuel
 #' @param saison Saison cible pour le composite multitemporel
+#' @param dem_channels Vecteur de 2 noms de canaux DEM (defaut: `c("SLOPE", "TWI")`)
 #' @param max_scenes_par_annee Nombre max de scenes par annee (defaut: 3)
 #' @param gpu Utiliser le GPU CUDA (defaut: FALSE)
 #' @return SpatRaster mono-bande avec les codes NDP0 a 0.2m
 #' @export
 #' @examples
 #' \dontrun{
-#' # Segmentation avec aerial + DEM
+#' # Segmentation avec aerial + DEM (pente + TWI)
 #' maestro_segmentation_pipeline(
 #'   "data/aoi.gpkg",
 #'   backbone_path = "models/MAESTRO_pretrain.ckpt",
 #'   decoder_path = "models/segmenter_ndp0_best.pt"
 #' )
 #'
-#' # Avec toutes les modalites
+#' # Avec DSM + DTM classique
 #' maestro_segmentation_pipeline(
 #'   "data/aoi.gpkg",
 #'   backbone_path = "models/MAESTRO_pretrain.ckpt",
 #'   decoder_path = "models/segmenter_ndp0_best.pt",
-#'   use_s2 = TRUE, use_s1 = TRUE
+#'   dem_channels = c("DSM", "DTM")
 #' )
 #' }
 maestro_segmentation_pipeline <- function(aoi_path = "data/aoi.gpkg",
@@ -334,6 +340,7 @@ maestro_segmentation_pipeline <- function(aoi_path = "data/aoi.gpkg",
                                             annees_sentinel = NULL,
                                             saison = "ete",
                                             max_scenes_par_annee = 3L,
+                                            dem_channels = c("SLOPE", "TWI"),
                                             gpu = FALSE) {
   # --- Validation ---
   if (!file.exists(aoi_path)) {
@@ -376,12 +383,12 @@ maestro_segmentation_pipeline <- function(aoi_path = "data/aoi.gpkg",
   rgbi_path <- file.path(output_dir, "ortho_rgbi.tif")
   terra::writeRaster(rgbi, rgbi_path, overwrite = TRUE)
 
-  # 4. Telecharger le DEM
-  dem_data <- download_dem_for_aoi(aoi, output_dir, rgbi = rgbi)
+  # 4. Telecharger le DEM (2 canaux au choix, 1m natif)
+  dem_data <- download_dem_for_aoi(aoi, output_dir, dem_channels = dem_channels)
 
   modalites <- list(aerial = rgbi)
   if (!is.null(dem_data)) {
-    modalites$dem <- aligner_dem_sur_rgbi(dem_data$dem, rgbi)
+    modalites$dem <- dem_data$dem
   }
 
   # 5. Sentinel-2
@@ -477,7 +484,8 @@ preparer_donnees_segmentation <- function(aoi_path = "data/aoi.gpkg",
                                             date_sentinel = NULL,
                                             annees_sentinel = NULL,
                                             saison = "ete",
-                                            max_scenes_par_annee = 3L) {
+                                            max_scenes_par_annee = 3L,
+                                            dem_channels = c("SLOPE", "TWI")) {
   if (!file.exists(aoi_path)) {
     stop(sprintf("Fichier AOI introuvable: %s", aoi_path))
   }
@@ -500,12 +508,12 @@ preparer_donnees_segmentation <- function(aoi_path = "data/aoi.gpkg",
   )
   rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
 
-  # 3. DEM
-  dem_data <- download_dem_for_aoi(aoi, tmp_dir, rgbi = rgbi)
+  # 3. DEM (2 canaux au choix, 1m natif)
+  dem_data <- download_dem_for_aoi(aoi, tmp_dir, dem_channels = dem_channels)
 
   modalites <- list(aerial = rgbi)
   if (!is.null(dem_data)) {
-    modalites$dem <- aligner_dem_sur_rgbi(dem_data$dem, rgbi)
+    modalites$dem <- dem_data$dem
   }
 
   # 4. Sentinel-2

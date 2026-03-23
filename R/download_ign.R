@@ -368,40 +368,51 @@ download_mnt_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
   list(mnt = mnt, mnt_path = mnt_path)
 }
 
-#' Telecharger le DEM 2 bandes (DSM + DTM) pour une AOI
+#' Telecharger le DEM 2 bandes pour une AOI avec derives terrain
 #'
-#' Telecharge le Modele Numerique de Terrain (DTM/MNT) et le Modele Numerique
-#' de Surface (DSM/MNS) depuis la Geoplateforme IGN via WMS-R.
-#' Le DTM provient du RGE ALTI 1m (couverture nationale).
-#' Le DSM provient du LiDAR HD (couverture partielle, fallback = DTM duplique).
+#' Telecharge le DTM (RGE ALTI 1m) et le DSM (LiDAR HD) depuis la
+#' Geoplateforme IGN via WMS-R, puis calcule les derives morphologiques
+#' (pente, orientation, TPI, TWI) a la resolution native de 1m.
 #'
-#' Le modele MAESTRO attend un DEM a 2 canaux : (DSM, DTM).
+#' Le DEM reste a 1m de resolution (50x50 pixels par patch de 50m).
+#' L'utilisateur choisit 2 canaux parmi DSM, DTM, SLOPE, ASPECT, TPI, TWI.
 #'
 #' @param aoi sf object en Lambert-93
 #' @param output_dir Repertoire de sortie
-#' @param rgbi SpatRaster de reference pour le reechantillonnage a 0.2m
-#'   (NULL = garder la resolution native 1m)
-#' @return Liste avec `dem` (SpatRaster 2 bandes DSM+DTM), `dem_path`,
-#'   `dsm_source` ("lidar_hd" ou "dtm_copie"), ou NULL si echec
+#' @param dem_channels Vecteur de 2 noms de canaux a utiliser parmi
+#'   `c("DSM", "DTM", "SLOPE", "ASPECT", "TPI", "TWI")`.
+#'   Defaut: `c("SLOPE", "TWI")` (les plus discriminants pour la foret).
+#' @return Liste avec `dem` (SpatRaster 2 bandes a 1m), `dem_path`,
+#'   `dsm_source`, `dem_channels`, ou NULL si echec
 #' @export
-download_dem_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
+download_dem_for_aoi <- function(aoi, output_dir, dem_channels = c("SLOPE", "TWI")) {
   fs::dir_create(output_dir)
 
-  dem_path <- file.path(output_dir, "dem_2bands.tif")
+  dem_channels <- toupper(dem_channels)
+  if (length(dem_channels) != 2) {
+    stop("dem_channels doit contenir exactement 2 noms, ex: c('SLOPE', 'TWI')")
+  }
+
+  # Suffixe de cache base sur les canaux choisis
+  channels_tag <- tolower(paste(dem_channels, collapse = "_"))
+  dem_path <- file.path(output_dir, sprintf("dem_%s_1m.tif", channels_tag))
 
   # Cache
   if (file.exists(dem_path)) {
-    message("\n=== DEM 2 bandes deja telecharge (cache) ===")
+    message(sprintf("\n=== DEM deja calcule (cache): %s ===",
+                     paste(dem_channels, collapse = " + ")))
     dem <- terra::rast(dem_path)
-    dsm_source <- if (terra::nlyr(dem) >= 2) "cache" else "cache"
-    return(list(dem = dem, dem_path = dem_path, dsm_source = dsm_source))
+    names(dem) <- dem_channels
+    return(list(dem = dem, dem_path = dem_path, dsm_source = "cache",
+                dem_channels = dem_channels))
   }
 
   bbox <- as.numeric(sf::st_bbox(sf::st_union(aoi)))
   aoi_vect <- terra::vect(sf::st_union(aoi))
 
   # --- DTM (MNT) : couverture nationale RGE ALTI 1m ---
-  message(sprintf("\n=== Telechargement DEM MAESTRO (DSM + DTM) ==="))
+  message(sprintf("\n=== Telechargement DEM MAESTRO (%s) a 1m ===",
+                   paste(dem_channels, collapse = " + ")))
   message("--- DTM (MNT) : RGE ALTI 1m ---")
 
   dtm <- tryCatch(
@@ -421,46 +432,55 @@ download_dem_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
   names(dtm) <- "DTM"
 
   # --- DSM (MNS) : LiDAR HD (couverture partielle) ---
-  message("--- DSM (MNS) : LiDAR HD ---")
+  # Telecharge seulement si un canal DSM est demande
   dsm_source <- "dtm_copie"
+  needs_dsm <- "DSM" %in% dem_channels
 
-  dsm <- tryCatch({
-    r <- download_ign_tiled(bbox, layer = .ign_config$LAYER_MNS,
-                             res_m = .ign_config$RES_DEM,
-                             output_dir = output_dir, prefix = "dsm",
-                             styles = "normal")
-    r <- terra::crop(r, aoi_vect)
-    if (validate_wms_data(r, min_pct = 10)) {
-      dsm_source <- "lidar_hd"
-      r
-    } else {
-      message("  DSM LiDAR HD: couverture insuffisante, utilisation du DTM")
+  if (needs_dsm) {
+    message("--- DSM (MNS) : LiDAR HD ---")
+    dsm <- tryCatch({
+      r <- download_ign_tiled(bbox, layer = .ign_config$LAYER_MNS,
+                               res_m = .ign_config$RES_DEM,
+                               output_dir = output_dir, prefix = "dsm",
+                               styles = "normal")
+      r <- terra::crop(r, aoi_vect)
+      if (validate_wms_data(r, min_pct = 10)) {
+        dsm_source <- "lidar_hd"
+        r
+      } else {
+        message("  DSM LiDAR HD: couverture insuffisante, utilisation du DTM")
+        NULL
+      }
+    }, error = function(e) {
+      message("  DSM LiDAR HD non disponible: ", e$message)
+      message("  Fallback: duplication du DTM comme DSM")
       NULL
+    })
+
+    if (is.null(dsm)) {
+      dsm <- dtm
+      dsm_source <- "dtm_copie"
+      message("  DSM = copie du DTM (pas de LiDAR HD disponible)")
     }
-  }, error = function(e) {
-    message("  DSM LiDAR HD non disponible: ", e$message)
-    message("  Fallback: duplication du DTM comme DSM")
-    NULL
-  })
-
-  if (is.null(dsm)) {
+    names(dsm) <- "DSM"
+  } else {
     dsm <- dtm
-    dsm_source <- "dtm_copie"
-    message("  DSM = copie du DTM (pas de LiDAR HD disponible)")
-  }
-  names(dsm) <- "DSM"
-
-  # Reechantillonnage sur la grille RGBI si fourni
-  if (!is.null(rgbi)) {
-    message("Reechantillonnage DEM de 1m vers 0.2m...")
-    dtm <- terra::resample(dtm, rgbi, method = "bilinear")
-    dsm <- terra::resample(dsm, rgbi, method = "bilinear")
+    names(dsm) <- "DSM"
+    message("  DSM non requis (canaux: %s)", paste(dem_channels, collapse = ", "))
   }
 
-  # Empiler DSM + DTM (2 bandes, dans cet ordre pour MAESTRO)
-  dem <- c(dsm, dtm)
-  names(dem) <- c("DSM", "DTM")
+  # --- Calcul des derives morphologiques a 1m ---
+  needs_derives <- any(dem_channels %in% c("SLOPE", "ASPECT", "TPI", "TWI"))
+  if (needs_derives) {
+    derives <- calculer_derives_terrain(dtm)
+  } else {
+    derives <- list()
+  }
 
+  # --- Assembler les 2 canaux choisis ---
+  dem <- assembler_dem_channels(dsm, dtm, derives, dem_channels)
+
+  # Sauvegarder a 1m (resolution native)
   terra::writeRaster(dem, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
 
   dtm_vals <- terra::values(dtm, na.rm = TRUE)
@@ -469,6 +489,8 @@ download_dem_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
                      min(dtm_vals, na.rm = TRUE), max(dtm_vals, na.rm = TRUE)))
   }
   message(sprintf("  Source DSM: %s", dsm_source))
+  message(sprintf("  Canaux DEM: %s", paste(dem_channels, collapse = " + ")))
+  message(sprintf("  Resolution: 1m (50x50 px par patch de 50m)"))
   message(sprintf("DEM: %s (%d x %d px, %d bandes)",
                    dem_path, terra::ncol(dem), terra::nrow(dem), terra::nlyr(dem)))
 
@@ -477,6 +499,7 @@ download_dem_for_aoi <- function(aoi, output_dir, rgbi = NULL) {
   if (length(tile_files) > 0) fs::file_delete(tile_files)
 
   dem <- terra::rast(dem_path)
-  names(dem) <- c("DSM", "DTM")
-  list(dem = dem, dem_path = dem_path, dsm_source = dsm_source)
+  names(dem) <- dem_channels
+  list(dem = dem, dem_path = dem_path, dsm_source = dsm_source,
+       dem_channels = dem_channels)
 }

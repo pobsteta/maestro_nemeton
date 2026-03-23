@@ -46,7 +46,7 @@ class SegmentationDataset(Dataset):
     Structure attendue :
         data_dir/
             aerial/       *.tif (4 bandes, 250x250)
-            dem/          *.tif (2 bandes, 250x250) [optionnel]
+            dem/          *.tif (2 bandes, 50x50)   [optionnel, 1m]
             s2/           *.tif (10 bandes, 5x5)    [optionnel]
             s1_asc/       *.tif (2 bandes, 5x5)     [optionnel]
             s1_des/       *.tif (2 bandes, 5x5)     [optionnel]

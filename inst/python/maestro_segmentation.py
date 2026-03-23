@@ -45,7 +45,7 @@ CLASSES_NDP0 = [
 # Nombre de tokens spatiaux par modalite (patch 50m)
 TOKENS_GRID = {
     "aerial": (15, 15),   # 250/16 = 15 (arrondi inf, reste = 10px de bord)
-    "dem":    (7, 7),     # 250/32 = 7  (reste = 26px de bord)
+    "dem":    (7, 7),     # 50/7 = 7 (DEM a 1m, 50px par patch)
     "s2":     (2, 2),     # 5/2 = 2     (reste = 1px de bord)
     "s1_asc": (2, 2),     # 5/2 = 2
     "s1_des": (2, 2),     # 5/2 = 2
@@ -171,7 +171,7 @@ class MAESTROSegmenter(nn.Module):
         """
         Args:
             inputs: dict[str, Tensor] des modalites
-                    {"aerial": (B,4,250,250), "dem": (B,2,250,250), ...}
+                    {"aerial": (B,4,250,250), "dem": (B,2,50,50), ...}
 
         Returns:
             logits: (B, n_classes, 250, 250)

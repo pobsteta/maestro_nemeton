@@ -122,9 +122,10 @@ extraire_patches_raster <- function(r, grille, taille_pixels = 250) {
 #' Taille de patch par modalite MAESTRO
 #'
 #' Retourne la taille de patch en pixels attendue par le modele MAESTRO
-#' pour chaque modalite. Les modalites a haute resolution (aerial, dem)
-#' utilisent 250 pixels, tandis que les modalites Sentinel (10m) utilisent
-#' 5 pixels pour couvrir la meme emprise de 50m.
+#' pour chaque modalite, selon la resolution native :
+#'   - aerial : 250 pixels (0.2m, 50m / 0.2m)
+#'   - dem    : 50 pixels  (1m, 50m / 1m)
+#'   - s2, s1 : 5 pixels   (10m, 50m / 10m)
 #'
 #' @param mod_name Nom de la modalite
 #' @param taille_pixels_ref Taille de reference (defaut: 250 pour aerial)
@@ -136,7 +137,11 @@ taille_patch_modalite <- function(mod_name, taille_pixels_ref = 250L) {
   if (mod_name %in% sentinel_mods) {
     return(5L)
   }
-  # aerial et dem : taille de reference (250px a 0.2m)
+  # DEM a 1m de resolution : 50m / 1m = 50 pixels
+  if (mod_name == "dem") {
+    return(50L)
+  }
+  # aerial : taille de reference (250px a 0.2m)
   as.integer(taille_pixels_ref)
 }
 
@@ -145,7 +150,8 @@ taille_patch_modalite <- function(mod_name, taille_pixels_ref = 250L) {
 #' Pour chaque patch de la grille, extrait les valeurs de chaque modalite
 #' (aerial, dem, s2, s1_asc, s1_des) separement. Chaque modalite est
 #' reechantillonnee a sa taille de patch native :
-#'   - aerial, dem : 250 x 250 pixels (0.2m)
+#'   - aerial : 250 x 250 pixels (0.2m)
+#'   - dem    : 50 x 50 pixels   (1m)
 #'   - s2, s1_asc, s1_des : 5 x 5 pixels (10m)
 #'
 #' Les donnees sont structurees pour etre passees au modele MAESTRO.

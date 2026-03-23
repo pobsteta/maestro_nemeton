@@ -6,7 +6,7 @@ Appele depuis R via reticulate.
 Le modele MAESTRO est un Masked Autoencoder (MAE) multi-modal pre-entraine
 sur des donnees d'observation de la Terre :
   - aerial : RGBI 0.2m (4 bandes, patch 16x16)
-  - dem    : DSM+DTM 0.2m (2 bandes, patch 32x32)
+  - dem    : 2 canaux terrain 1m (ex: SLOPE+TWI, patch 7x7)
   - spot   : RGB 1.6m (3 bandes, patch 16x16)
   - s1_asc : Sentinel-1 ascending (2 bandes VV+VH, patch 2x2)
   - s1_des : Sentinel-1 descending (2 bandes VV+VH, patch 2x2)
@@ -59,7 +59,7 @@ ESSENCES_TREESATAI = [
 # Configuration des modalites MAESTRO
 MODALITIES = {
     "aerial": {"in_channels": 4, "patch_size": (16, 16)},
-    "dem":    {"in_channels": 2, "patch_size": (32, 32)},
+    "dem":    {"in_channels": 2, "patch_size": (7, 7)},
     "spot":   {"in_channels": 3, "patch_size": (16, 16)},
     "s1_asc": {"in_channels": 2, "patch_size": (2, 2)},
     "s1_des": {"in_channels": 2, "patch_size": (2, 2)},
@@ -577,9 +577,20 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
         # Analyser les cles manquantes
         missing_head = [k for k in missing if k.startswith("head.")]
         missing_other = [k for k in missing if not k.startswith("head.")]
-        if missing_other:
-            print("  [ATTENTION] Cles manquantes (non-head): %d" % len(missing_other))
-            for k in missing_other[:10]:
+        # Poids DEM ignores: le patchifier DEM a change de taille
+        # (32x32 pretrained -> 7x7 pour DEM 1m). Le patchifier DEM sera
+        # reinitialise aleatoirement, ce qui est attendu car les canaux
+        # (ex: SLOPE+TWI) different du pretrained (DSM+DTM).
+        missing_dem = [k for k in missing_other
+                       if "patch_embed.dem" in k] if missing_other else []
+        missing_real = [k for k in (missing_other or [])
+                        if "patch_embed.dem" not in k]
+        if missing_dem:
+            print("  [INFO] Patchifier DEM reinitialise "
+                  "(1m/7x7 vs pretrained 0.2m/32x32, %d cles)" % len(missing_dem))
+        if missing_real:
+            print("  [ATTENTION] Cles manquantes (non-head): %d" % len(missing_real))
+            for k in missing_real[:10]:
                 print("    - %s" % k)
         if missing_head:
             print("  [INFO] Tete de classification non pre-entrainee "
@@ -689,7 +700,10 @@ def _normaliser_optique(img, max_val=255.0):
 
 
 def _normaliser_mnt(mnt):
-    """Normalise le MNT en min-max par batch."""
+    """Normalise le MNT/derives terrain en min-max par batch.
+
+    Fonctionne pour tout type de canal terrain (DTM, DSM, pente, TWI, TPI, aspect).
+    """
     mnt_min = mnt.min()
     mnt_max = mnt.max()
     if mnt_max > mnt_min:
