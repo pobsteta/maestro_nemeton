@@ -443,7 +443,7 @@ touch ~/TRAINING_DONE
 
 # Notification de fin
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-BEST_MODEL=$(ls -1 "$OUTPUT_DIR"/segmenter_ndp0_best.pt 2>/dev/null && echo "oui" || echo "non")
+BEST_MODEL=$([ -f "$OUTPUT_DIR/segmenter_ndp0_best.pt" ] && echo "$OUTPUT_DIR/segmenter_ndp0_best.pt" || echo "non")
 DUREE=$((SECONDS / 60))
 
 send_notification \
