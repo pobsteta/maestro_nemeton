@@ -258,17 +258,18 @@ executer_segmentation <- function(segmenter, modalites, aoi,
     vals_cls[mask_better] <- terra::values(new_cls)[mask_better]
     vals_prob[mask_better] <- terra::values(new_prob)[mask_better]
 
-    # Reecrire dans les rasters complets
-    # Creer un raster temporaire avec les nouvelles valeurs et le merger
-    tmp_cls <- terra::rast(ext = ext_inter, nrows = nrow(cur_cls),
-                            ncols = ncol(cur_cls), crs = terra::crs(ref))
-    terra::values(tmp_cls) <- vals_cls
-    tmp_prob <- terra::rast(ext = ext_inter, nrows = nrow(cur_cls),
-                             ncols = ncol(cur_cls), crs = terra::crs(ref))
-    terra::values(tmp_prob) <- vals_prob
+    # Reecrire dans les rasters complets via indexation row/col
+    row_start <- terra::rowFromY(raster_classes, terra::ymax(ext_inter))
+    row_end   <- terra::rowFromY(raster_classes, terra::ymin(ext_inter))
+    col_start <- terra::colFromX(raster_classes, terra::xmin(ext_inter))
+    col_end   <- terra::colFromX(raster_classes, terra::xmax(ext_inter))
 
-    raster_classes <- terra::merge(tmp_cls, raster_classes)
-    raster_proba <- terra::merge(tmp_prob, raster_proba)
+    rows <- row_start:row_end
+    cols <- col_start:col_end
+    cells <- terra::cellFromRowColCombine(raster_classes, rows, cols)
+
+    raster_classes[cells] <- vals_cls
+    raster_proba[cells] <- vals_prob
 
     n_done <- n_done + 1L
     if (n_done %% 50 == 0 || n_done == n_patches) {
