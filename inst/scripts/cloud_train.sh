@@ -98,6 +98,29 @@ except Exception as e:
     fi
 }
 
+# Trap pour notifier en cas d'echec (set -e arrete le script avant la
+# notification de fin si une commande echoue)
+_on_error() {
+    local exit_code=$?
+    local line_no=$1
+    echo ""
+    echo "!!! ERREUR ligne $line_no (code $exit_code) !!!"
+    DUREE=$((SECONDS / 60))
+    send_notification \
+        "[MAESTRO] ECHEC entrainement" \
+        "Erreur ligne $line_no (code $exit_code) sur ${HOSTNAME:-instance} - Duree: ${DUREE}min" \
+        "L'entrainement MAESTRO a echoue.
+
+  - Instance : ${HOSTNAME:-instance} (${PUBLIC_IP:-<IP>})
+  - Erreur   : ligne $line_no, code de sortie $exit_code
+  - Duree    : ${DUREE} minutes
+
+Connectez-vous pour diagnostiquer :
+  ssh root@${PUBLIC_IP:-<IP>}
+  tmux attach -t maestro"
+}
+trap '_on_error $LINENO' ERR
+
 echo "========================================================"
 echo " MAESTRO - Entrainement GPU sur Scaleway"
 echo " TreeSatAI -> 8 classes regroupees"

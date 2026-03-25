@@ -102,6 +102,29 @@ except Exception as e:
     fi
 }
 
+# Trap pour notifier en cas d'echec (set -e arrete le script avant la
+# notification de fin si une commande echoue)
+_on_error() {
+    local exit_code=$?
+    local line_no=$1
+    echo ""
+    echo "!!! ERREUR ligne $line_no (code $exit_code) !!!"
+    DUREE=$((SECONDS / 60))
+    send_notification \
+        "[MAESTRO] Segmentation - ECHEC entrainement" \
+        "Erreur ligne $line_no (code $exit_code) sur ${HOSTNAME:-instance} - Duree: ${DUREE}min" \
+        "L'entrainement segmentation a echoue.
+
+  - Instance : ${HOSTNAME:-instance} (${PUBLIC_IP:-<IP>})
+  - Erreur   : ligne $line_no, code de sortie $exit_code
+  - Duree    : ${DUREE} minutes
+
+Connectez-vous pour diagnostiquer :
+  ssh root@${PUBLIC_IP:-<IP>}
+  tmux attach -t maestro"
+}
+trap '_on_error $LINENO' ERR
+
 echo "========================================================"
 echo " MAESTRO - Entrainement decodeur segmentation (NDP0)"
 echo " Backbone gele, decodeur entrainable (~3M params)"
@@ -247,6 +270,12 @@ if [ -n "$FLAIR_NIVEAU" ] && [ ! -d "$DATA_DIR/train/aerial" ]; then
     R_MODALITES=$(echo "$MODALITES" | sed 's/,/","/g')
     R_MODALITES="c(\"$R_MODALITES\")"
 
+    send_notification \
+        "[MAESTRO] Labellisation FLAIR-HUB demarree" \
+        "Labellisation FLAIR-HUB (niveau $FLAIR_NIVEAU) demarree sur ${HOSTNAME:-instance} - Modalites: $MODALITES"
+
+    LABEL_START=$SECONDS
+
     Rscript -e "
     # Charger le package en mode dev
     for (f in list.files('R', full.names = TRUE, pattern = '\\\\.R\$')) source(f)
@@ -273,6 +302,11 @@ if [ -n "$FLAIR_NIVEAU" ] && [ ! -d "$DATA_DIR/train/aerial" ]; then
         min_forest_pct = $MIN_FOREST_PCT
     )
     "
+
+    LABEL_DUREE=$(( (SECONDS - LABEL_START) / 60 ))
+    send_notification \
+        "[MAESTRO] Labellisation FLAIR-HUB terminee" \
+        "Labellisation FLAIR-HUB terminee sur ${HOSTNAME:-instance} - Duree: ${LABEL_DUREE}min"
 fi
 
 # --- Mode 2 : AOI (telecharger ortho+DEM, labelliser, decouper) ---
@@ -284,6 +318,12 @@ if [ -n "$AOI_PATH" ] && [ ! -d "$DATA_DIR/train/aerial" ]; then
 
     install_r_deps
 
+    send_notification \
+        "[MAESTRO] Labellisation AOI demarree" \
+        "Labellisation AOI demarree sur ${HOSTNAME:-instance} - AOI: $AOI_PATH"
+
+    LABEL_START=$SECONDS
+
     Rscript -e "
     for (f in list.files('R', full.names = TRUE, pattern = '\\\\.R\$')) source(f)
 
@@ -294,6 +334,11 @@ if [ -n "$AOI_PATH" ] && [ ! -d "$DATA_DIR/train/aerial" ]; then
         min_forest_pct = $MIN_FOREST_PCT
     )
     "
+
+    LABEL_DUREE=$(( (SECONDS - LABEL_START) / 60 ))
+    send_notification \
+        "[MAESTRO] Labellisation AOI terminee" \
+        "Labellisation AOI terminee sur ${HOSTNAME:-instance} - Duree: ${LABEL_DUREE}min"
 fi
 
 # --- Verifier que les patches existent ---
@@ -398,7 +443,7 @@ touch ~/TRAINING_DONE
 
 # Notification de fin
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-BEST_MODEL=$(ls -1 "$OUTPUT_DIR"/segmenter_ndp0_best.pt 2>/dev/null && echo "oui" || echo "non")
+BEST_MODEL=$([ -f "$OUTPUT_DIR/segmenter_ndp0_best.pt" ] && echo "$OUTPUT_DIR/segmenter_ndp0_best.pt" || echo "non")
 DUREE=$((SECONDS / 60))
 
 send_notification \

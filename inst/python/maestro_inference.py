@@ -565,8 +565,16 @@ def charger_modele(chemin_poids, n_classes=13, device="cpu", **kwargs):
             prefixes_gardees.append("model.encoder.%s." % enc_name)
 
         prefixes_tuple = tuple(prefixes_gardees)
-        filtered_sd = {k: v for k, v in state_dict.items()
-                       if k.startswith(prefixes_tuple)}
+        # Filtrer les poids du checkpoint, en excluant les patch_embed
+        # dont la taille ne correspond pas (ex: DEM 32x32 pretrained vs 7x7)
+        model_sd = modele.state_dict()
+        filtered_sd = {}
+        for k, v in state_dict.items():
+            if not k.startswith(prefixes_tuple):
+                continue
+            if k in model_sd and model_sd[k].shape != v.shape:
+                continue  # taille incompatible, sera reinitialise
+            filtered_sd[k] = v
 
         print("  Checkpoint: %d cles totales, %d cles utilisees"
               % (len(state_dict), len(filtered_sd)))
