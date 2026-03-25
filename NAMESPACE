@@ -93,6 +93,10 @@ export(mask_vegetation)
 export(generer_rapport)
 export(generer_rapport_segmentation)
 
+# --- Contrainte FLAIR ---
+export(contraindre_par_flair)
+export(pipeline_flair_contrainte)
+
 # --- Analyse et evaluation ---
 export(compute_landcover_stats)
 export(cross_landcover_dem)

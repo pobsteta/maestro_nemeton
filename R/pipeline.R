@@ -306,6 +306,11 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
 #' @param dem_channels Vecteur de 2 noms de canaux DEM (defaut: `c("SLOPE", "TWI")`)
 #' @param max_scenes_par_annee Nombre max de scenes par annee (defaut: 3)
 #' @param gpu Utiliser le GPU CUDA (defaut: FALSE)
+#' @param use_flair Logical. Appliquer la contrainte FLAIR feuillus/resineux
+#'   sur la segmentation ? (defaut: `FALSE`). Si `TRUE`, execute l'inference
+#'   FLAIR puis corrige les pixels incoherents.
+#' @param model_flair Identifiant du modele FLAIR HuggingFace
+#'   (defaut: `"IGNF/FLAIR-HUB_RGBI_19cl"`).
 #' @return SpatRaster mono-bande avec les codes NDP0 a 0.2m
 #' @export
 #' @examples
@@ -341,7 +346,9 @@ maestro_segmentation_pipeline <- function(aoi_path = "data/aoi.gpkg",
                                             saison = "ete",
                                             max_scenes_par_annee = 3L,
                                             dem_channels = c("SLOPE", "TWI"),
-                                            gpu = FALSE) {
+                                            gpu = FALSE,
+                                            use_flair = FALSE,
+                                            model_flair = "IGNF/FLAIR-HUB_RGBI_19cl") {
   # --- Validation ---
   if (!file.exists(aoi_path)) {
     stop(sprintf("Fichier AOI introuvable: %s", aoi_path))
@@ -440,10 +447,26 @@ maestro_segmentation_pipeline <- function(aoi_path = "data/aoi.gpkg",
     gpu = gpu
   )
 
+  # 9. Contrainte FLAIR (optionnel)
+  if (use_flair) {
+    flair_result <- pipeline_flair_contrainte(
+      raster_seg  = raster_seg,
+      rgbi        = rgbi,
+      dem         = if (!is.null(dem_data)) dem_data$dem else NULL,
+      output_dir  = output_dir,
+      model_flair = model_flair,
+      gpu         = gpu
+    )
+    raster_seg <- flair_result$raster
+  }
+
   message("\n========================================================")
   message(" Segmentation terminee !")
-  message(sprintf(" Carte NDP0 a 0.2m: %s/segmentation_ndp0.tif",
-                   output_dir))
+  message(sprintf(" Carte NDP0 a 0.2m: %s/segmentation_ndp0%s.tif",
+                   output_dir, if (use_flair) "_flair" else ""))
+  if (use_flair) {
+    message(" Contrainte FLAIR appliquee (feuillus/resineux)")
+  }
   message("========================================================")
 
   invisible(raster_seg)

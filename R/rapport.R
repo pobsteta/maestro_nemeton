@@ -121,6 +121,10 @@ generer_rapport <- function(aoi_path,
 #' @param gpu Logical. Utiliser le GPU ? (defaut `FALSE`).
 #' @param run_segmentation Logical. Executer la segmentation ? Si `FALSE`,
 #'   charge un resultat existant depuis `output_dir` (defaut `TRUE`).
+#' @param use_flair Logical. Appliquer la contrainte FLAIR feuillus/resineux
+#'   apres la segmentation ? (defaut `FALSE`).
+#' @param model_flair Identifiant du modele FLAIR HuggingFace
+#'   (defaut `"IGNF/FLAIR-HUB_RGBI_19cl"`).
 #' @param open Logical. Ouvrir le rapport apres generation ?
 #'   (defaut `TRUE` en session interactive).
 #' @return Le chemin du fichier rapport genere (invisiblement).
@@ -166,6 +170,8 @@ generer_rapport_segmentation <- function(aoi_path,
                                           date_sentinel = NULL,
                                           gpu = FALSE,
                                           run_segmentation = TRUE,
+                                          use_flair = FALSE,
+                                          model_flair = "IGNF/FLAIR-HUB_RGBI_19cl",
                                           open = interactive()) {
 
   format <- match.arg(format)
@@ -197,7 +203,9 @@ generer_rapport_segmentation <- function(aoi_path,
     use_s1           = use_s1,
     date_sentinel    = date_sentinel,
     gpu              = gpu,
-    run_segmentation = run_segmentation
+    run_segmentation = run_segmentation,
+    use_flair        = use_flair,
+    model_flair      = model_flair
   )
 
   message("Generation du rapport segmentation ", format, " ...")
@@ -205,6 +213,7 @@ generer_rapport_segmentation <- function(aoi_path,
   message("  Sortie      : ", file.path(output_dir, output_file))
   message("  DEM         : ", paste(dem_channels, collapse = " + "))
   message("  Segmentation: ", ifelse(run_segmentation, "oui (execution)", "non (resultats existants)"))
+  if (use_flair) message("  FLAIR       : oui (contrainte feuillus/resineux)")
   if (use_s2) message("  Sentinel-2  : oui")
   if (use_s1) message("  Sentinel-1  : oui")
 

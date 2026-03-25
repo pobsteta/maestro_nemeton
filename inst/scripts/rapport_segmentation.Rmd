@@ -31,6 +31,8 @@ params:
   date_sentinel: NULL
   gpu: FALSE
   run_segmentation: TRUE
+  use_flair: FALSE
+  model_flair: "IGNF/FLAIR-HUB_RGBI_19cl"
 ---
 
 ```{r setup, include=FALSE}
@@ -445,7 +447,76 @@ if (has_ggplot2) {
 }
 ```
 
-# 5. Donnees de sortie
+# 5. Contrainte FLAIR (feuillus / resineux)
+
+```{r flair-section, eval=params$use_flair, results='asis'}
+cat("La classification FLAIR (CoSIA 19 classes) est utilisee pour contraindre\n")
+cat("la segmentation MAESTRO : les pixels identifies comme *conifere* par FLAIR\n")
+cat("ne conservent que les essences resineuses, et inversement pour les *feuillus*.\n")
+```
+
+```{r flair-inference, eval=params$use_flair}
+message("  Lancement de l'inference FLAIR...")
+flair_result <- pipeline_flair_contrainte(
+  raster_seg  = raster_seg,
+  rgbi        = rgbi,
+  output_dir  = params$output_dir,
+  model_flair = params$model_flair,
+  gpu         = params$gpu
+)
+raster_seg_orig <- raster_seg
+raster_seg <- flair_result$raster
+```
+
+```{r flair-stats, eval=params$use_flair}
+knitr::kable(flair_result$stats,
+             caption = "Corrections appliquees par la contrainte FLAIR",
+             row.names = FALSE)
+```
+
+```{r flair-compare, eval=params$use_flair, fig.cap="Comparaison avant / apres contrainte FLAIR", fig.height=5}
+cls <- classes_ndp0()
+codes_orig <- sort(unique(terra::values(raster_seg_orig, na.rm = TRUE)))
+codes_flair <- sort(unique(terra::values(raster_seg, na.rm = TRUE)))
+
+par(mfrow = c(1, 2))
+terra::plot(raster_seg_orig, main = "MAESTRO (original)",
+            col = cls$couleur[cls$code %in% codes_orig], type = "classes",
+            levels = cls$classe[cls$code %in% codes_orig])
+terra::plot(raster_seg, main = "MAESTRO + FLAIR",
+            col = cls$couleur[cls$code %in% codes_flair], type = "classes",
+            levels = cls$classe[cls$code %in% codes_flair])
+par(mfrow = c(1, 1))
+```
+
+```{r flair-diff, eval=params$use_flair, fig.cap="Pixels modifies par la contrainte FLAIR", fig.height=5}
+# Carte des pixels modifies
+diff_rast <- raster_seg_orig != raster_seg
+diff_rast[is.na(diff_rast)] <- 0
+terra::plot(diff_rast, main = "Pixels corriges par FLAIR",
+            col = c("#EEEEEE", "#FF4444"), legend = FALSE)
+legend("topright", legend = c("Inchange", "Corrige"),
+       fill = c("#EEEEEE", "#FF4444"), border = NA)
+
+n_corr <- sum(terra::values(diff_rast, na.rm = TRUE))
+n_tot <- sum(!is.na(terra::values(raster_seg_orig)))
+cat(sprintf("\n  Pixels corriges: %d / %d (%.1f%%)\n",
+            n_corr, n_tot, n_corr / n_tot * 100))
+```
+
+```{r flair-stats-apres, eval=params$use_flair}
+# Recalculer les stats apres contrainte
+stats_seg <- compute_landcover_stats(raster_seg, classes = cls)
+stats_seg <- stats_seg[order(stats_seg$code), ]
+
+knitr::kable(
+  stats_seg[, c("code", "classe", "type", "n_pixels", "proportion", "surface_ha")],
+  caption = "Statistiques par classe NDP0 (apres contrainte FLAIR)",
+  row.names = FALSE
+)
+```
+
+# 6. Donnees de sortie
 
 ```{r fichiers-sortie}
 out_files <- fs::dir_info(params$output_dir, recurse = FALSE)
@@ -458,7 +529,7 @@ out_df <- data.frame(
 knitr::kable(out_df, caption = "Fichiers generes", row.names = FALSE)
 ```
 
-# 6. Resume
+# 7. Resume
 
 ```{r resume}
 surface_foret <- sum(stats_seg$surface_ha[stats_seg$code < 9])
@@ -483,7 +554,7 @@ if (exists("duree")) {
 }
 ```
 
-# 7. Session
+# 8. Session
 
 ```{r session}
 sessionInfo()
