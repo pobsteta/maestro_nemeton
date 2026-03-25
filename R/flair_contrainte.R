@@ -163,7 +163,7 @@ contraindre_par_flair <- function(raster_seg,
 #' @param dem SpatRaster DEM (optionnel, pour le modele RGBI-DEM 5 bandes)
 #' @param output_dir Repertoire de sortie
 #' @param model_flair Identifiant du modele FLAIR HuggingFace
-#'   (defaut `"IGNF/FLAIR-HUB_RGBI_19cl"`).
+#'   (defaut `"IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet"`).
 #' @param gpu Logical. Utiliser le GPU ? (defaut `FALSE`).
 #' @return Liste avec `raster` contraint et `stats` des corrections
 #' @export

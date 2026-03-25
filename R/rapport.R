@@ -124,7 +124,7 @@ generer_rapport <- function(aoi_path,
 #' @param use_flair Logical. Appliquer la contrainte FLAIR feuillus/resineux
 #'   apres la segmentation ? (defaut `FALSE`).
 #' @param model_flair Identifiant du modele FLAIR HuggingFace
-#'   (defaut `"IGNF/FLAIR-HUB_RGBI_19cl"`).
+#'   (defaut `"IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet"`).
 #' @param open Logical. Ouvrir le rapport apres generation ?
 #'   (defaut `TRUE` en session interactive).
 #' @return Le chemin du fichier rapport genere (invisiblement).

@@ -310,7 +310,7 @@ maestro_pipeline <- function(aoi_path = "data/aoi.gpkg",
 #'   sur la segmentation ? (defaut: `FALSE`). Si `TRUE`, execute l'inference
 #'   FLAIR puis corrige les pixels incoherents.
 #' @param model_flair Identifiant du modele FLAIR HuggingFace
-#'   (defaut: `"IGNF/FLAIR-HUB_RGBI_19cl"`).
+#'   (defaut: `"IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet"`).
 #' @return SpatRaster mono-bande avec les codes NDP0 a 0.2m
 #' @export
 #' @examples

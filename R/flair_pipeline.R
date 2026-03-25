@@ -11,10 +11,10 @@
 #' @param aoi_path Chemin vers le fichier GeoPackage de la zone d'interet
 #' @param output_dir Repertoire de sortie (defaut: `"outputs"`)
 #' @param model_id Identifiant du modele Hugging Face
-#'   (defaut: `"IGNF/FLAIR-INC_RGBI_15cl"`)
+#'   (defaut: `"IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet"`)
 #' @param encoder Architecture encodeur (defaut: `"resnet34"`)
 #' @param decoder Architecture decodeur (defaut: `"unet"`)
-#' @param n_classes Nombre de classes (defaut: 19 pour CoSIA)
+#' @param n_classes Nombre de classes (defaut: 15 pour FLAIR-INC)
 #' @param dem_channels Canaux DEM a ajouter. `NULL` = pas de DEM (RGBI seul, 4 bandes).
 #'   Vecteur de noms parmi `c("DSM", "DTM", "SLOPE", "ASPECT", "TPI", "TWI")`.
 #'   Ex: `c("SLOPE", "TWI")` = 6 bandes (RGBI + pente + TWI).
@@ -35,12 +35,12 @@
 #' # Avec pente + TWI (6 bandes, optimal foret)
 #' flair_pipeline("data/aoi.gpkg",
 #'                 dem_channels = c("SLOPE", "TWI"),
-#'                 model_id = "IGNF/FLAIR-HUB_RGBI-DEM_19cl")
+#'                 model_id = "IGNF/FLAIR-INC_rgbie_15cl_resnet34-unet")
 #'
 #' # Avec DTM classique (5 bandes)
 #' flair_pipeline("data/aoi.gpkg",
 #'                 dem_channels = "DTM",
-#'                 model_id = "IGNF/FLAIR-HUB_RGBI-DEM_19cl")
+#'                 model_id = "IGNF/FLAIR-INC_rgbie_15cl_resnet34-unet")
 #' }
 flair_pipeline <- function(aoi_path = "data/aoi.gpkg",
                             output_dir = "outputs",
