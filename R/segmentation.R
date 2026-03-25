@@ -259,13 +259,13 @@ executer_segmentation <- function(segmenter, modalites, aoi,
     vals_prob[mask_better] <- terra::values(new_prob)[mask_better]
 
     # Reecrire dans les rasters complets via indexation row/col
+    # Utiliser les dimensions reelles du crop pour eviter les decalages
     row_start <- terra::rowFromY(raster_classes, terra::ymax(ext_inter))
-    row_end   <- terra::rowFromY(raster_classes, terra::ymin(ext_inter))
     col_start <- terra::colFromX(raster_classes, terra::xmin(ext_inter))
-    col_end   <- terra::colFromX(raster_classes, terra::xmax(ext_inter))
-
-    rows <- row_start:row_end
-    cols <- col_start:col_end
+    nr <- terra::nrow(cur_cls)
+    nc <- terra::ncol(cur_cls)
+    rows <- seq(row_start, length.out = nr)
+    cols <- seq(col_start, length.out = nc)
     cells <- terra::cellFromRowColCombine(raster_classes, rows, cols)
 
     raster_classes[cells] <- vals_cls
