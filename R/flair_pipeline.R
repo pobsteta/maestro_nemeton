@@ -14,7 +14,8 @@
 #'   (defaut: `"IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet"`)
 #' @param encoder Architecture encodeur (defaut: `"resnet34"`)
 #' @param decoder Architecture decodeur (defaut: `"unet"`)
-#' @param n_classes Nombre de classes (defaut: 15 pour FLAIR-INC)
+#' @param n_classes Nombre de classes du modele (defaut: 19, les checkpoints
+#'   FLAIR-INC ont 19 canaux de sortie meme pour 15 classes actives)
 #' @param dem_channels Canaux DEM a ajouter. `NULL` = pas de DEM (RGBI seul, 4 bandes).
 #'   Vecteur de noms parmi `c("DSM", "DTM", "SLOPE", "ASPECT", "TPI", "TWI")`.
 #'   Ex: `c("SLOPE", "TWI")` = 6 bandes (RGBI + pente + TWI).
@@ -47,7 +48,7 @@ flair_pipeline <- function(aoi_path = "data/aoi.gpkg",
                             model_id = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
                             encoder = "resnet34",
                             decoder = "unet",
-                            n_classes = 15L,
+                            n_classes = 19L,
                             dem_channels = NULL,
                             millesime_ortho = NULL,
                             millesime_irc = NULL,
@@ -135,8 +136,7 @@ flair_pipeline <- function(aoi_path = "data/aoi.gpkg",
     utiliser_gpu = gpu
   )
 
-  # 10. Assembler les resultats
-  classes_table <- if (n_classes <= 15L) classes_cosia_15() else classes_cosia()
+  # 10. Assembler les resultats (Python remappe toujours vers CoSIA 0-15)
   resultats <- assembler_resultats_flair(
     raster_classe,
     classes = classes_table,
