@@ -44,10 +44,10 @@
 #' }
 flair_pipeline <- function(aoi_path = "data/aoi.gpkg",
                             output_dir = "outputs",
-                            model_id = "IGNF/FLAIR-INC_RGBI_15cl",
+                            model_id = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
                             encoder = "resnet34",
                             decoder = "unet",
-                            n_classes = 19L,
+                            n_classes = 15L,
                             dem_channels = NULL,
                             millesime_ortho = NULL,
                             millesime_irc = NULL,

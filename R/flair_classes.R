@@ -109,20 +109,25 @@ classes_lpis <- function() {
 flair_models <- function() {
   data.frame(
     id = c(
-      "IGNF/FLAIR-INC_RGBI_15cl",
-      "IGNF/FLAIR-HUB_RGBI_19cl",
-      "IGNF/FLAIR-HUB_RGBI-DEM_19cl"
+      "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
+      "IGNF/FLAIR-INC_rgbie_15cl_resnet34-unet",
+      "IGNF/FLAIR-HUB_LC-A_IR_convnextv2tiny-upernet"
     ),
     architecture = c(
       "ResNet34-UNet",
-      "ConvNeXTV2-UPerNet",
+      "ResNet34-UNet",
       "ConvNeXTV2-UPerNet"
     ),
-    encoder = c("resnet34", "convnextv2_nano", "convnextv2_nano"),
-    decoder = c("unet", "upernet", "upernet"),
-    n_bands = c(4L, 4L, 5L),
-    supervision = c("cosia_15cl", "cosia_19cl", "cosia_19cl"),
-    miou = c(55.0, 64.1, 65.1),
+    encoder = c("resnet34", "resnet34", "convnextv2_tiny"),
+    decoder = c("unet", "unet", "upernet"),
+    n_bands = c(4L, 5L, 4L),
+    supervision = c("cosia_15cl", "cosia_15cl", "cosia_19cl"),
+    miou = c(55.0, 56.0, 64.1),
+    description = c(
+      "RGBI 4 bandes (baseline)",
+      "RGBI + elevation 5 bandes",
+      "FLAIR-HUB multimodal (aerial IR)"
+    ),
     stringsAsFactors = FALSE
   )
 }

@@ -348,7 +348,7 @@ maestro_segmentation_pipeline <- function(aoi_path = "data/aoi.gpkg",
                                             dem_channels = c("SLOPE", "TWI"),
                                             gpu = FALSE,
                                             use_flair = FALSE,
-                                            model_flair = "IGNF/FLAIR-HUB_RGBI_19cl") {
+                                            model_flair = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet") {
   # --- Validation ---
   if (!file.exists(aoi_path)) {
     stop(sprintf("Fichier AOI introuvable: %s", aoi_path))

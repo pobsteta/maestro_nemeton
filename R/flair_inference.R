@@ -47,7 +47,7 @@ charger_modele_flair <- function(chemin_poids, n_classes = 19L,
 #' @param token Token HuggingFace (optionnel)
 #' @return Liste avec `weights` (chemin des poids) et `config` (configuration)
 #' @export
-telecharger_modele_flair <- function(model_id = "IGNF/FLAIR-INC_RGBI_15cl",
+telecharger_modele_flair <- function(model_id = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
                                       token = NULL) {
   message(sprintf("=== Telechargement modele FLAIR: %s ===", model_id))
 

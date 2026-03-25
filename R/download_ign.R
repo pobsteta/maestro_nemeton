@@ -473,7 +473,7 @@ download_dem_for_aoi <- function(aoi, output_dir, dem_channels = c("SLOPE", "TWI
   } else {
     dsm <- dtm
     names(dsm) <- "DSM"
-    message("  DSM non requis (canaux: %s)", paste(dem_channels, collapse = ", "))
+    message(sprintf("  DSM non requis (canaux: %s)", paste(dem_channels, collapse = ", ")))
   }
 
   # --- Calcul des derives morphologiques a 1m ---

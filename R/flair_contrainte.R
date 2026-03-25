@@ -46,12 +46,13 @@ contraindre_par_flair <- function(raster_seg,
     raster_flair <- terra::resample(raster_flair, raster_seg, method = "near")
   }
 
-  # Classes CoSIA forestieres
-  CLS_CONIFERE <- 6L
-  CLS_FEUILLU  <- 7L
-  CLS_MIXTE    <- 17L
-  CLS_LIGNEUX  <- 18L
-  CLS_COUPE    <- 16L
+  # Classes CoSIA forestieres (0-based : argmax du modele Python)
+  # Correspondance : index 0-based = code classes_cosia() - 1
+  CLS_CONIFERE <- 5L   # "Conifere" = code CoSIA 6, index 5
+  CLS_FEUILLU  <- 6L   # "Feuillu" = code CoSIA 7, index 6
+  CLS_MIXTE    <- 16L  # "Mixte conifere+feuillu" = code 17, index 16
+  CLS_LIGNEUX  <- 17L  # "Ligneux" = code 18, index 17
+  CLS_COUPE    <- 15L  # "Coupe forestiere" = code 16, index 15
 
   # Classes NDP0 par type
   ndp0_feuillus <- c(0L, 1L, 2L, 7L, 8L)  # Chene, Hetre, Chataignier, Peuplier, Feuillus divers
@@ -178,7 +179,7 @@ pipeline_flair_contrainte <- function(raster_seg,
                                        rgbi,
                                        dem = NULL,
                                        output_dir = "outputs",
-                                       model_flair = "IGNF/FLAIR-HUB_RGBI_19cl",
+                                       model_flair = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
                                        gpu = FALSE) {
 
   message("=== Pipeline FLAIR + contrainte segmentation ===")

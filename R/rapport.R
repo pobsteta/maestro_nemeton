@@ -171,7 +171,7 @@ generer_rapport_segmentation <- function(aoi_path,
                                           gpu = FALSE,
                                           run_segmentation = TRUE,
                                           use_flair = FALSE,
-                                          model_flair = "IGNF/FLAIR-HUB_RGBI_19cl",
+                                          model_flair = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
                                           open = interactive()) {
 
   format <- match.arg(format)
