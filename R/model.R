@@ -43,11 +43,11 @@ find_checkpoint_name <- function(hf_repo) {
 reparer_symlink_hf <- function(chemin) {
   # Tester la lisibilite reelle (file.exists retourne TRUE pour les
   # symlinks casses sur Windows)
-  lisible <- tryCatch({
+  lisible <- suppressWarnings(tryCatch({
     con <- file(chemin, "rb")
     close(con)
     TRUE
-  }, warning = function(w) FALSE, error = function(e) FALSE)
+  }, warning = function(w) FALSE, error = function(e) FALSE))
 
   if (lisible) return(chemin)
 
