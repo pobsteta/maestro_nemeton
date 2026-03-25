@@ -1,0 +1,484 @@
+---
+title: "Rapport de Segmentation MAESTRO"
+subtitle: "Carte forestiere dense a 0.2m (NDP0)"
+author: "Package maestro"
+date: "`r format(Sys.time(), '%d %B %Y - %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+    fig_width: 10
+    fig_height: 7
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: true
+    latex_engine: xelatex
+    keep_tex: false
+params:
+  aoi_path: "data/aoi.gpkg"
+  output_dir: "outputs"
+  backbone_path: NULL
+  decoder_path: "segmenter_ndp0_best.pt"
+  millesime_ortho: NULL
+  millesime_irc: NULL
+  dem_channels: !r c("SLOPE", "TWI")
+  use_s2: FALSE
+  use_s1: FALSE
+  date_sentinel: NULL
+  gpu: FALSE
+  run_segmentation: TRUE
+---
+
+```{r setup, include=FALSE}
+project_root <- tryCatch(
+  rprojroot::find_rstudio_root_file(),
+  error = function(e) {
+    candidate <- normalizePath(file.path(getwd(), "..", ".."), mustWork = FALSE)
+    if (file.exists(file.path(candidate, "DESCRIPTION"))) candidate
+    else getwd()
+  }
+)
+knitr::opts_knit$set(root.dir = project_root)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = TRUE,
+  fig.align = "center",
+  out.width = "100%"
+)
+library(maestro)
+library(sf)
+library(terra)
+library(fs)
+has_ggplot2 <- requireNamespace("ggplot2", quietly = TRUE)
+if (has_ggplot2) {
+  library(ggplot2)
+  library(patchwork)
+}
+```
+
+# 1. Zone d'etude (AOI)
+
+```{r aoi}
+aoi <- load_aoi(params$aoi_path)
+aoi_l93 <- sf::st_transform(aoi, 2154)
+bbox <- sf::st_bbox(aoi_l93)
+surface_ha <- as.numeric(sf::st_area(sf::st_union(aoi_l93))) / 10000
+
+cat(sprintf("  Entites    : %d\n", nrow(aoi)))
+cat(sprintf("  CRS        : %s\n", sf::st_crs(aoi_l93)$Name))
+cat(sprintf("  Emprise    : [%.0f, %.0f] - [%.0f, %.0f]\n",
+            bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"]))
+cat(sprintf("  Surface    : %.2f ha\n", surface_ha))
+```
+
+```{r carte-aoi, fig.cap="Zone d'etude"}
+plot(sf::st_geometry(aoi_l93), col = "#228B2244", border = "#228B22", lwd = 2,
+     main = "AOI - Zone d'etude", axes = TRUE)
+```
+
+# 2. Donnees d'entree
+
+## 2.1 Orthophotos IGN (RGBI)
+
+```{r ortho}
+ortho <- download_ortho_for_aoi(
+  aoi_l93, params$output_dir,
+  millesime_ortho = params$millesime_ortho,
+  millesime_irc = params$millesime_irc
+)
+```
+
+```{r rgbi}
+rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
+cat(sprintf("  Image RGBI: %d x %d px, %d bandes\n",
+            terra::ncol(rgbi), terra::nrow(rgbi), terra::nlyr(rgbi)))
+```
+
+```{r plot-rgbi, fig.cap="Ortho RVB et IRC (fausses couleurs)"}
+par(mfrow = c(1, 2))
+terra::plotRGB(ortho$rvb, r = 1, g = 2, b = 3, main = "Ortho RVB")
+terra::plotRGB(ortho$irc, r = 1, g = 2, b = 3, main = "Ortho IRC (PIR-R-V)")
+par(mfrow = c(1, 1))
+```
+
+## 2.2 Modele Numerique de Terrain (DEM)
+
+Les canaux DEM selectionnes : **`r paste(params$dem_channels, collapse = " + ")`**
+
+```{r dem}
+dem_data <- download_dem_for_aoi(aoi_l93, params$output_dir,
+                                  dem_channels = params$dem_channels)
+dem <- dem_data$dem
+cat(sprintf("  DEM: %d x %d px, %d bandes (%s)\n",
+            terra::ncol(dem), terra::nrow(dem), terra::nlyr(dem),
+            paste(names(dem), collapse = ", ")))
+```
+
+```{r plot-dem, fig.cap="Canaux DEM"}
+par(mfrow = c(1, 2))
+terra::plot(dem[[1]], main = params$dem_channels[1],
+            col = hcl.colors(50, "Viridis"))
+terra::plot(dem[[2]], main = params$dem_channels[2],
+            col = hcl.colors(50, "Plasma"))
+par(mfrow = c(1, 1))
+```
+
+```{r stats-dem}
+dem_stats <- data.frame(
+  Canal = names(dem),
+  Min = round(sapply(1:terra::nlyr(dem), function(i)
+    min(terra::values(dem[[i]]), na.rm = TRUE)), 2),
+  Max = round(sapply(1:terra::nlyr(dem), function(i)
+    max(terra::values(dem[[i]]), na.rm = TRUE)), 2),
+  Moyenne = round(sapply(1:terra::nlyr(dem), function(i)
+    mean(terra::values(dem[[i]]), na.rm = TRUE)), 2),
+  Ecart_type = round(sapply(1:terra::nlyr(dem), function(i)
+    sd(terra::values(dem[[i]]), na.rm = TRUE)), 2)
+)
+knitr::kable(dem_stats, caption = "Statistiques des canaux DEM")
+```
+
+## 2.3 Indices spectraux
+
+```{r ndvi, fig.cap="NDVI et masque de vegetation"}
+ndvi <- compute_ndvi(rgbi)
+veg_mask <- mask_vegetation(rgbi)
+
+par(mfrow = c(1, 2))
+terra::plot(ndvi, main = "NDVI",
+            col = colorRampPalette(c("#d73027", "#fee08b", "#1a9850"))(100))
+terra::plot(veg_mask, main = "Vegetation (NDVI >= 0.3)",
+            col = c("#D3D3D3", "#228B22"), legend = FALSE)
+par(mfrow = c(1, 1))
+
+ndvi_vals <- terra::values(ndvi, na.rm = TRUE)
+cat(sprintf("  NDVI: min=%.3f, max=%.3f, moyenne=%.3f\n",
+            min(ndvi_vals), max(ndvi_vals), mean(ndvi_vals)))
+cat(sprintf("  Couverture vegetale (NDVI >= 0.3): %.1f%%\n",
+            mean(terra::values(veg_mask, na.rm = TRUE)) * 100))
+```
+
+```{r sentinel-s2, eval=params$use_s2, results='asis'}
+cat("\n## 2.4 Sentinel-2\n\n")
+```
+
+```{r download-s2, eval=params$use_s2}
+s2 <- download_s2_for_aoi(aoi_l93, params$output_dir,
+                            date_cible = params$date_sentinel)
+if (!is.null(s2)) {
+  cat(sprintf("  Sentinel-2: %d bandes, %d x %d px\n",
+              terra::nlyr(s2), terra::ncol(s2), terra::nrow(s2)))
+  terra::plotRGB(s2, r = 4, g = 3, b = 2, stretch = "lin",
+                 main = "Sentinel-2 RGB")
+}
+```
+
+```{r sentinel-s1, eval=params$use_s1, results='asis'}
+cat("\n## 2.5 Sentinel-1\n\n")
+```
+
+```{r download-s1, eval=params$use_s1}
+s1 <- download_s1_for_aoi(aoi_l93, params$output_dir,
+                            date_cible = params$date_sentinel)
+if (!is.null(s1) && !is.null(s1$s1_asc)) {
+  cat(sprintf("  Sentinel-1 ASC: %d bandes (VV, VH)\n", terra::nlyr(s1$s1_asc)))
+  par(mfrow = c(1, 2))
+  terra::plot(s1$s1_asc[[1]], main = "S1 Ascendant - VV")
+  terra::plot(s1$s1_asc[[2]], main = "S1 Ascendant - VH")
+  par(mfrow = c(1, 1))
+}
+```
+
+# 3. Segmentation MAESTRO
+
+## 3.1 Configuration du modele
+
+```{r config-model}
+cls <- classes_ndp0()
+knitr::kable(cls, caption = "10 classes NDP0 (Nomenclature Dense Produit 0)")
+```
+
+```{r palette-ndp0, fig.cap="Palette de couleurs NDP0", fig.height=3}
+par(mar = c(1, 8, 2, 1))
+barplot(rep(1, nrow(cls)), horiz = TRUE, col = cls$couleur,
+        names.arg = cls$classe, las = 1, border = NA,
+        main = "Classes NDP0", xaxt = "n")
+```
+
+## 3.2 Execution de la segmentation
+
+```{r segmentation, eval=params$run_segmentation}
+t_start <- Sys.time()
+
+# Construire les modalites
+modalites <- list(aerial = rgbi)
+if (!is.null(dem_data)) modalites$dem <- dem_data$dem
+
+if (params$use_s2 && exists("s2") && !is.null(s2)) {
+  modalites$s2 <- aligner_sentinel(s2, rgbi, target_res = 10)
+}
+if (params$use_s1 && exists("s1") && !is.null(s1)) {
+  if (!is.null(s1$s1_asc)) {
+    modalites$s1_asc <- aligner_sentinel(s1$s1_asc, rgbi, target_res = 10)
+  }
+  if (!is.null(s1$s1_des)) {
+    modalites$s1_des <- aligner_sentinel(s1$s1_des, rgbi, target_res = 10)
+  }
+}
+
+# Charger le segmenter
+segmenter <- charger_segmenter(
+  backbone_path = params$backbone_path,
+  decoder_path = params$decoder_path,
+  modalites = names(modalites),
+  gpu = params$gpu
+)
+
+# Executer la segmentation
+raster_seg <- executer_segmentation(
+  segmenter = segmenter,
+  modalites = modalites,
+  aoi = aoi_l93,
+  output_dir = params$output_dir,
+  patch_size = 250L,
+  resolution = 0.2,
+  overlap_m = 10,
+  gpu = params$gpu
+)
+
+t_end <- Sys.time()
+duree <- difftime(t_end, t_start, units = "mins")
+cat(sprintf("\n  Duree de segmentation: %.1f minutes\n", as.numeric(duree)))
+```
+
+```{r load-seg, eval=!params$run_segmentation}
+# Charger un resultat existant
+seg_path <- file.path(params$output_dir, "segmentation_ndp0.tif")
+if (file.exists(seg_path)) {
+  raster_seg <- terra::rast(seg_path)
+  message("  Resultat charge: ", seg_path)
+} else {
+  stop("Aucun resultat de segmentation trouve dans ", params$output_dir)
+}
+```
+
+# 4. Resultats
+
+## 4.1 Carte de segmentation
+
+```{r carte-seg, fig.cap="Carte de segmentation NDP0 a 0.2m"}
+cls <- classes_ndp0()
+codes_presents <- sort(unique(terra::values(raster_seg, na.rm = TRUE)))
+palette <- cls$couleur[cls$code %in% codes_presents]
+
+terra::plot(raster_seg, main = "Segmentation NDP0 (0.2m)",
+            col = palette, type = "classes",
+            levels = cls$classe[cls$code %in% codes_presents])
+```
+
+```{r carte-overlay, fig.cap="Superposition segmentation / orthophoto"}
+terra::plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin")
+seg_resamp <- terra::resample(raster_seg, ortho$rvb, method = "near")
+# Masquer le non-foret pour l'overlay
+seg_foret <- seg_resamp
+seg_foret[seg_foret == 9] <- NA
+terra::plot(seg_foret, col = adjustcolor(cls$couleur[1:9], alpha.f = 0.5),
+            add = TRUE, legend = FALSE)
+title("Segmentation sur orthophoto (foret uniquement)")
+```
+
+## 4.2 Distribution des classes
+
+```{r stats-classes}
+stats_seg <- compute_landcover_stats(raster_seg, classes = cls)
+stats_seg <- stats_seg[order(stats_seg$code), ]
+
+knitr::kable(
+  stats_seg[, c("code", "classe", "type", "n_pixels", "proportion", "surface_ha")],
+  caption = "Statistiques par classe NDP0",
+  row.names = FALSE
+)
+```
+
+```{r barplot-classes, fig.cap="Distribution des essences forestieres", fig.height=5}
+# Exclure non-foret pour le graphique des essences
+stats_foret <- stats_seg[stats_seg$code < 9, ]
+
+if (nrow(stats_foret) > 0) {
+  if (has_ggplot2) {
+    p <- ggplot(stats_foret, aes(x = reorder(classe, -surface_ha),
+                                   y = surface_ha, fill = classe)) +
+      geom_col(show.legend = FALSE) +
+      scale_fill_manual(values = setNames(stats_foret$couleur, stats_foret$classe)) +
+      labs(x = NULL, y = "Surface (ha)",
+           title = "Repartition des essences forestieres") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10))
+    print(p)
+  } else {
+    par(mar = c(8, 4, 3, 1))
+    barplot(stats_foret$surface_ha, names.arg = stats_foret$classe,
+            col = stats_foret$couleur, las = 2,
+            ylab = "Surface (ha)", main = "Repartition des essences forestieres")
+  }
+}
+```
+
+```{r pie-type, fig.cap="Feuillus vs Resineux", fig.height=4}
+type_stats <- aggregate(surface_ha ~ type, data = stats_seg[stats_seg$code < 9, ], sum)
+if (nrow(type_stats) > 0) {
+  couleurs_type <- c(feuillu = "#228B22", resineux = "#FF8C00")
+  pie(type_stats$surface_ha, labels = sprintf("%s\n%.2f ha", type_stats$type, type_stats$surface_ha),
+      col = couleurs_type[type_stats$type],
+      main = "Proportion feuillus / resineux")
+}
+```
+
+## 4.3 Analyse topographique par essence
+
+```{r topo-dem, fig.cap="Statistiques DEM par classe"}
+# Utiliser le DTM pour l'analyse altitudinale si disponible
+# Sinon utiliser la premiere bande DEM
+dem_analyse <- dem[[1]]
+
+cross <- cross_landcover_dem(raster_seg, dem_analyse, classes = cls)
+cross <- cross[order(cross$code), ]
+
+knitr::kable(
+  cross[, c("classe", "alt_mean", "alt_min", "alt_max", "alt_sd", "n_pixels")],
+  caption = sprintf("Statistiques %s par classe", params$dem_channels[1]),
+  col.names = c("Classe", "Moyenne", "Min", "Max", "Ecart-type", "N pixels"),
+  row.names = FALSE
+)
+```
+
+```{r boxplot-topo, fig.cap="Distribution topographique par essence", fig.height=6}
+# Echantillonner pour les boxplots (eviter memoire)
+seg_vals <- terra::values(raster_seg, na.rm = FALSE)[, 1]
+dem1_vals <- terra::values(
+  terra::resample(dem[[1]], raster_seg, method = "bilinear"),
+  na.rm = FALSE
+)[, 1]
+dem2_vals <- terra::values(
+  terra::resample(dem[[2]], raster_seg, method = "bilinear"),
+  na.rm = FALSE
+)[, 1]
+
+valid <- !is.na(seg_vals) & !is.na(dem1_vals) & seg_vals < 9
+n_sample <- min(sum(valid), 100000)
+idx <- sample(which(valid), n_sample)
+
+df_topo <- data.frame(
+  classe = cls$classe[match(seg_vals[idx], cls$code)],
+  canal1 = dem1_vals[idx],
+  canal2 = dem2_vals[idx]
+)
+
+if (has_ggplot2) {
+  p1 <- ggplot(df_topo, aes(x = reorder(classe, canal1, median), y = canal1, fill = classe)) +
+    geom_boxplot(outlier.size = 0.3, show.legend = FALSE) +
+    scale_fill_manual(values = setNames(cls$couleur[cls$code < 9],
+                                         cls$classe[cls$code < 9])) +
+    coord_flip() +
+    labs(x = NULL, y = params$dem_channels[1],
+         title = paste(params$dem_channels[1], "par essence")) +
+    theme_minimal()
+
+  p2 <- ggplot(df_topo, aes(x = reorder(classe, canal2, median), y = canal2, fill = classe)) +
+    geom_boxplot(outlier.size = 0.3, show.legend = FALSE) +
+    scale_fill_manual(values = setNames(cls$couleur[cls$code < 9],
+                                         cls$classe[cls$code < 9])) +
+    coord_flip() +
+    labs(x = NULL, y = params$dem_channels[2],
+         title = paste(params$dem_channels[2], "par essence")) +
+    theme_minimal()
+
+  print(p1 / p2)
+} else {
+  par(mfrow = c(1, 2), mar = c(8, 4, 3, 1))
+  boxplot(canal1 ~ classe, data = df_topo, las = 2, col = cls$couleur[cls$code < 9],
+          ylab = params$dem_channels[1], main = paste(params$dem_channels[1], "par essence"))
+  boxplot(canal2 ~ classe, data = df_topo, las = 2, col = cls$couleur[cls$code < 9],
+          ylab = params$dem_channels[2], main = paste(params$dem_channels[2], "par essence"))
+  par(mfrow = c(1, 1))
+}
+```
+
+## 4.4 NDVI par essence
+
+```{r ndvi-essence, fig.cap="Distribution du NDVI par essence", fig.height=5}
+ndvi_vals <- terra::values(
+  terra::resample(ndvi, raster_seg, method = "bilinear"),
+  na.rm = FALSE
+)[, 1]
+
+df_ndvi <- data.frame(
+  classe = cls$classe[match(seg_vals[idx], cls$code)],
+  ndvi = ndvi_vals[idx]
+)
+df_ndvi <- df_ndvi[!is.na(df_ndvi$ndvi), ]
+
+if (has_ggplot2) {
+  p <- ggplot(df_ndvi, aes(x = reorder(classe, ndvi, median), y = ndvi, fill = classe)) +
+    geom_boxplot(outlier.size = 0.3, show.legend = FALSE) +
+    scale_fill_manual(values = setNames(cls$couleur[cls$code < 9],
+                                         cls$classe[cls$code < 9])) +
+    coord_flip() +
+    labs(x = NULL, y = "NDVI", title = "NDVI par essence forestiere") +
+    theme_minimal()
+  print(p)
+} else {
+  par(mar = c(8, 4, 3, 1))
+  boxplot(ndvi ~ classe, data = df_ndvi, las = 2, col = cls$couleur[cls$code < 9],
+          ylab = "NDVI", main = "NDVI par essence forestiere")
+}
+```
+
+# 5. Donnees de sortie
+
+```{r fichiers-sortie}
+out_files <- fs::dir_info(params$output_dir, recurse = FALSE)
+out_files <- out_files[order(-out_files$size), ]
+out_df <- data.frame(
+  Fichier = basename(out_files$path),
+  Taille = format(out_files$size, big.mark = " "),
+  Modifie = format(out_files$modification_time, "%Y-%m-%d %H:%M")
+)
+knitr::kable(out_df, caption = "Fichiers generes", row.names = FALSE)
+```
+
+# 6. Resume
+
+```{r resume}
+surface_foret <- sum(stats_seg$surface_ha[stats_seg$code < 9])
+essence_dom <- stats_seg$classe[stats_seg$code < 9][which.max(stats_seg$surface_ha[stats_seg$code < 9])]
+
+cat("=== Resume de la segmentation ===\n\n")
+cat(sprintf("  AOI             : %s\n", basename(params$aoi_path)))
+cat(sprintf("  Surface totale  : %.2f ha\n", surface_ha))
+cat(sprintf("  Surface foret   : %.2f ha (%.1f%%)\n",
+            surface_foret, surface_foret / surface_ha * 100))
+cat(sprintf("  Essence dominante: %s (%.2f ha)\n",
+            essence_dom, max(stats_seg$surface_ha[stats_seg$code < 9])))
+cat(sprintf("  Modalites       : %s\n",
+            paste(c("aerial (RGBI)", paste0("dem (", paste(params$dem_channels, collapse="+"), ")"),
+                    if (params$use_s2) "Sentinel-2",
+                    if (params$use_s1) "Sentinel-1"), collapse = ", ")))
+cat(sprintf("  Resolution      : 0.2m\n"))
+cat(sprintf("  Classes NDP0    : %d classes detectees / 10\n",
+            length(codes_presents)))
+if (exists("duree")) {
+  cat(sprintf("  Duree           : %.1f minutes\n", as.numeric(duree)))
+}
+```
+
+# 7. Session
+
+```{r session}
+sessionInfo()
+```

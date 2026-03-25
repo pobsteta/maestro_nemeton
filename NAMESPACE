@@ -91,6 +91,7 @@ export(mask_vegetation)
 
 # --- Rapport ---
 export(generer_rapport)
+export(generer_rapport_segmentation)
 
 # --- Analyse et evaluation ---
 export(compute_landcover_stats)
